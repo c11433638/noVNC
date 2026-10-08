@@ -3,6 +3,13 @@
 [![Test Status](https://github.com/novnc/noVNC/workflows/Test/badge.svg)](https://github.com/novnc/noVNC/actions?query=workflow%3ATest)
 [![Lint Status](https://github.com/novnc/noVNC/workflows/Lint/badge.svg)](https://github.com/novnc/noVNC/actions?query=workflow%3ALint)
 
+### This fork
+
+This fork adds file uploads and downloads, local input method support,
+remembered browser login, mobile layout adjustments, and scripts for a
+TigerVNC/Xfce desktop. See [custom setup](docs/CUSTOM_SETUP.md) for installation
+and [file transfer](docs/FILE_TRANSFER.md) for usage.
+
 ### Description
 
 noVNC is both a HTML VNC client JavaScript library and an application built on

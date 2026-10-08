@@ -19,7 +19,7 @@
     <meta name="theme-color" content="#313131">
 
     <!-- Apple iOS Safari settings -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
@@ -38,13 +38,29 @@
 
     <!-- Stylesheets -->
     <link rel="stylesheet" href="app/styles/constants.css">
-    <link rel="stylesheet" href="app/styles/base.css">
+    <!-- Locally modified files carry a version, as the HTTPS proxy makes
+         browsers cache scripts and styles for hours. Bump it (here and in
+         the import map below) whenever these files change. -->
+    <link rel="stylesheet" href="app/styles/base.css?v=20261008b">
     <link rel="stylesheet" href="app/styles/input.css">
 
     <!-- Images that will later appear via CSS -->
     <link rel="preload" as="image" href="app/images/info.svg">
     <link rel="preload" as="image" href="app/images/error.svg">
     <link rel="preload" as="image" href="app/images/warning.svg">
+
+    <script type="importmap" data-cfasync="false">
+    {
+        "imports": {
+            "./app/ui.js": "./app/ui.js?v=20261008b",
+            "./app/browser-session.js": "./app/browser-session.js?v=20261008b",
+            "./app/file-transfer.js": "./app/file-transfer.js?v=20261008a",
+            "./app/localization.js": "./app/localization.js?v=20261008b",
+            "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261008a",
+            "./core/rfb.js": "./core/rfb.js?v=20261008b"
+        }
+    }
+    </script>
 
     <script type="module" crossorigin="anonymous" src="app/error-handler.js"></script>
 
@@ -188,6 +204,48 @@
             </div>
             </div>
 
+            <!-- File transfer -->
+            <input type="image" alt="File transfer" src="app/images/files.svg"
+                id="noVNC_files_button" class="noVNC_button" title="File transfer">
+            <div class="noVNC_crosscenter">
+            <div id="noVNC_files" class="noVNC_panel" role="region" aria-label="File transfer">
+                <div class="noVNC_heading">
+                    <img alt="" src="app/images/files.svg"> File transfer
+                </div>
+                <form id="noVNC_files_auth" class="noVNC_hidden">
+                    <label for="noVNC_files_password">VNC password:</label>
+                    <input type="password" id="noVNC_files_password" autocomplete="current-password">
+                    <button type="submit" id="noVNC_files_login">Access files</button>
+                </form>
+                <div id="noVNC_files_browser" class="noVNC_hidden">
+                    <p>Remote transfer folder:</p>
+                    <code id="noVNC_files_root" translate="no"></code>
+                    <p class="noVNC_subheading">Put remote files in this folder to download them.</p>
+                    <div class="noVNC_files_actions">
+                        <label class="noVNC_files_upload">
+                            <span>Upload files</span>
+                            <input type="file" id="noVNC_files_input" multiple aria-label="Upload files">
+                        </label>
+                        <button type="button" id="noVNC_files_refresh">Refresh</button>
+                    </div>
+                    <p id="noVNC_files_limit"></p>
+                    <div class="noVNC_files_navigation">
+                        <button type="button" id="noVNC_files_up">Parent folder</button>
+                        <code id="noVNC_files_path" translate="no">/</code>
+                    </div>
+                    <ul id="noVNC_files_list" aria-label="Remote files"></ul>
+                </div>
+                <div id="noVNC_files_progress_area" class="noVNC_hidden">
+                    <progress id="noVNC_files_progress" max="100" value="0" aria-label="Upload progress"></progress>
+                    <div class="noVNC_files_actions">
+                        <span id="noVNC_files_progress_text"></span>
+                        <button type="button" id="noVNC_files_cancel">Cancel</button>
+                    </div>
+                </div>
+                <p id="noVNC_files_status" role="status" aria-live="polite"></p>
+            </div>
+            </div>
+
             <!-- Toggle fullscreen -->
             <input type="image" alt="Full screen" src="app/images/fullscreen.svg"
                 id="noVNC_fullscreen_button" class="noVNC_button noVNC_hidden"
@@ -215,6 +273,13 @@
                             <input id="noVNC_setting_view_only" type="checkbox"
                                    class="toggle">
                             View only
+                        </label>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_ime_input" type="checkbox"
+                                   class="toggle">
+                            Use local input method
                         </label>
                     </li>
                     <li><hr></li>
@@ -300,6 +365,10 @@
                                             class="toggle">
                                     Keep client display awake while connected
                                 </label>
+                            </li>
+                            <li><hr></li>
+                            <li>
+                                <button id="noVNC_forget_browser" type="button">Forget browser login</button>
                             </li>
                             <li><hr></li>
                             <!-- Logging selection dropdown -->
@@ -398,7 +467,13 @@
         </div>
         <div id="noVNC_password_block">
             <label for="noVNC_password_input">Password:</label>
-            <input id="noVNC_password_input" type="password">
+            <input id="noVNC_password_input" type="password" autocomplete="current-password">
+        </div>
+        <div id="noVNC_remember_browser_block" class="noVNC_hidden">
+            <label>
+                <input id="noVNC_remember_browser" type="checkbox" checked>
+                Remember this browser for 7 days
+            </label>
         </div>
         <div class="button_row">
             <input id="noVNC_credentials_button" type="submit" value="Send credentials">
@@ -423,6 +498,8 @@
              style for example -->
         <textarea id="noVNC_keyboardinput" autocapitalize="off"
             autocomplete="off" spellcheck="false" tabindex="-1"></textarea>
+        <!-- Text being composed by the local input method -->
+        <div id="noVNC_ime_preedit"></div>
     </div>
 
     <audio id="noVNC_bell">

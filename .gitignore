@@ -10,3 +10,7 @@ recordings
 *.swp
 *~
 noVNC-*.tgz
+
+# Local dependency (its changes are preserved in docs/websockify-local.patch)
+/websockify/
+*.orig

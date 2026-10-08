@@ -21,12 +21,15 @@ export default class Keyboard {
         this._keyDownList = {};         // List of depressed keys
                                         // (even if they are happy)
         this._altGrArmed = false;       // Windows AltGr detection
+        this._isComposing = false;
 
         // keep these here so we can refer to them later
         this._eventHandlers = {
             'keyup': this._handleKeyUp.bind(this),
             'keydown': this._handleKeyDown.bind(this),
             'blur': this._allKeysUp.bind(this),
+            'compositionstart': () => { this._isComposing = true; },
+            'compositionend': () => { this._isComposing = false; },
         };
 
         // ===== EVENT HANDLERS =====
@@ -85,6 +88,26 @@ export default class Keyboard {
     }
 
     _handleKeyDown(e) {
+        // IME keys must reach the browser, including keys with no keycode
+        // and candidate selection keys carrying Ctrl/Alt. Some browsers do
+        // not set isComposing on every event, so track composition as well.
+        const textInput = this._target &&
+                          this._target.id === 'noVNC_keyboardinput';
+        if (textInput && (this._isComposing || e.isComposing ||
+                          e.keyCode === 229)) {
+            return;
+        }
+
+        // Text and Backspace are handled by input, including virtual keys
+        // without a code. Leave their default action intact so input fires.
+        const altGraph = e.getModifierState('AltGraph');
+        if (textInput && !e.metaKey &&
+            ((!e.ctrlKey && (!e.altKey || browser.isMac())) || altGraph) &&
+            (e.key === 'Backspace' ||
+             (typeof e.key === 'string' && [...e.key].length === 1))) {
+            return;
+        }
+
         const code = this._getKeyCode(e);
         let keysym = KeyboardUtil.getKeysym(e);
         let numlock = e.getModifierState('NumLock');
@@ -212,9 +235,14 @@ export default class Keyboard {
     }
 
     _handleKeyUp(e) {
-        stopEvent(e);
-
         const code = this._getKeyCode(e);
+        if (this._target && this._target.id === 'noVNC_keyboardinput' &&
+            (this._isComposing || e.isComposing || e.keyCode === 229) &&
+            !(code in this._keyDownList)) {
+            return;
+        }
+
+        stopEvent(e);
 
         // We can't get a release in the middle of an AltGr sequence, so
         // abort that detection
@@ -255,6 +283,7 @@ export default class Keyboard {
 
     _allKeysUp() {
         Log.Debug(">> Keyboard.allKeysUp");
+        this._isComposing = false;
 
         // Prevent control key being processed after losing focus.
         this._interruptAltGrSequence();
@@ -272,6 +301,8 @@ export default class Keyboard {
 
         this._target.addEventListener('keydown', this._eventHandlers.keydown);
         this._target.addEventListener('keyup', this._eventHandlers.keyup);
+        this._target.addEventListener('compositionstart', this._eventHandlers.compositionstart);
+        this._target.addEventListener('compositionend', this._eventHandlers.compositionend);
 
         // Release (key up) if window loses focus
         window.addEventListener('blur', this._eventHandlers.blur);
@@ -284,6 +315,8 @@ export default class Keyboard {
 
         this._target.removeEventListener('keydown', this._eventHandlers.keydown);
         this._target.removeEventListener('keyup', this._eventHandlers.keyup);
+        this._target.removeEventListener('compositionstart', this._eventHandlers.compositionstart);
+        this._target.removeEventListener('compositionend', this._eventHandlers.compositionend);
         window.removeEventListener('blur', this._eventHandlers.blur);
 
         // Release (key up) all keys that are in a down state

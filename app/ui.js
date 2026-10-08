@@ -17,6 +17,8 @@ import keysyms from "../core/input/keysymdef.js";
 import Keyboard from "../core/input/keyboard.js";
 import RFB from "../core/rfb.js";
 import WakeLockManager from './wakelock.js';
+import FileTransfer from './file-transfer.js';
+import * as BrowserSession from './browser-session.js';
 import * as WebUtil from "./webutil.js";
 
 const PAGE_TITLE = "noVNC";
@@ -44,10 +46,22 @@ const UI = {
 
     lastKeyboardinput: null,
     defaultKeyboardinputLen: 100,
+    imeComposing: false,
+    imeCommitTimer: null,
+
+    pacedKeys: [],
+    pacedKeysTimer: null,
+    pacedKeyDelay: 50,
+    textPasteDelay: 500,
+    textInputRevision: 0,
 
     inhibitReconnect: true,
     reconnectCallback: null,
     reconnectPassword: null,
+    sameOriginConnection: false,
+    rememberPendingPassword: null,
+    sessionRequest: null,
+    browserLoginTask: null,
 
     wakeLockManager: new WakeLockManager(),
 
@@ -62,7 +76,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/");
+            await l10n.setup(LINGUAS, "app/locale/", '20261008b');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -112,7 +126,9 @@ const UI = {
         }
 
         // Restore control bar position
-        const pos = WebUtil.readSetting('controlbar_pos');
+        const savedPos = WebUtil.readSetting('controlbar_pos');
+        // Keep the primary controls reachable on narrow touch screens.
+        const pos = isTouchDevice && window.innerWidth <= 700 ? 'bottom' : savedPos;
         if (['left', 'right', 'top', 'bottom'].includes(pos)) {
             UI.toggleControlbarSide(pos);
         } else {
@@ -124,10 +140,12 @@ const UI = {
         // Setup event handlers
         UI.addControlbarHandlers();
         UI.addTouchSpecificHandlers();
+        UI.addImeInputHandlers();
         UI.addExtraKeysHandlers();
         UI.addMachineHandlers();
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
+        UI.addFileTransferHandlers();
         UI.addSettingsHandlers();
         document.getElementById("noVNC_status")
             .addEventListener('click', UI.hideStatus);
@@ -183,13 +201,17 @@ const UI = {
         UI.initSetting('encrypt', (window.location.protocol === "https:"));
         UI.initSetting('password');
         UI.initSetting('autoconnect', false);
+        const smallTouchScreen = isTouchDevice &&
+            Math.min(window.innerWidth, window.innerHeight) <= 700;
         UI.initSetting('view_clip', false);
-        UI.initSetting('resize', 'off');
+        UI.initSetting('resize', smallTouchScreen ? 'scale' : 'off');
         UI.initSetting('quality', 6);
         UI.initSetting('compression', 2);
         UI.initSetting('shared', true);
         UI.initSetting('bell', 'on');
         UI.initSetting('view_only', false);
+        // Touch devices already type through the on-screen keyboard field
+        UI.initSetting('ime_input', !isTouchDevice);
         UI.initSetting('show_dot', false);
         UI.initSetting('path', 'websockify');
         UI.initSetting('repeaterID', '');
@@ -298,6 +320,18 @@ const UI = {
             .addEventListener('touchmove', UI.dragControlbarHandle);
     },
 
+    addImeInputHandlers() {
+        const input = document.getElementById("noVNC_keyboardinput");
+        input.addEventListener('compositionstart', UI.imeCompositionStart);
+        input.addEventListener('compositionupdate', UI.imeCompositionUpdate);
+        input.addEventListener('compositionend', UI.imeCompositionEnd);
+        input.addEventListener('focus', UI.imeInputFocus);
+
+        // Capture phase, as the screen stops mouse events from propagating
+        document.getElementById("noVNC_container")
+            .addEventListener('mousedown', UI.imeScreenMouseDown, true);
+    },
+
     addExtraKeysHandlers() {
         document.getElementById("noVNC_toggle_extra_keys_button")
             .addEventListener('click', UI.toggleExtraKeys);
@@ -340,6 +374,8 @@ const UI = {
             .addEventListener('click', UI.rejectServer);
         document.getElementById("noVNC_credentials_button")
             .addEventListener('click', UI.setCredentials);
+        document.getElementById("noVNC_forget_browser")
+            .addEventListener('click', UI.forgetBrowser);
     },
 
     addClipboardHandlers() {
@@ -376,6 +412,8 @@ const UI = {
         UI.addSettingChangeHandler('shared');
         UI.addSettingChangeHandler('view_only');
         UI.addSettingChangeHandler('view_only', UI.updateViewOnly);
+        UI.addSettingChangeHandler('ime_input');
+        UI.addSettingChangeHandler('ime_input', UI.updateImeInput);
         UI.addSettingChangeHandler('show_dot');
         UI.addSettingChangeHandler('show_dot', UI.updateShowDotCursor);
         UI.addSettingChangeHandler('keep_device_awake');
@@ -568,7 +606,7 @@ const UI = {
         UI.closeAllPanels();
         document.getElementById('noVNC_control_bar')
             .classList.remove("noVNC_open");
-        UI.rfb.focus();
+        UI.focusKeyboard();
     },
 
     toggleControlbar() {
@@ -943,6 +981,7 @@ const UI = {
         UI.closeSettingsPanel();
         UI.closePowerPanel();
         UI.closeClipboardPanel();
+        UI.closeFilesPanel();
         UI.closeExtraKeys();
     },
 
@@ -1084,6 +1123,29 @@ const UI = {
         Log.Debug("<< UI.clipboardSend");
     },
 
+    addFileTransferHandlers() {
+        UI.fileTransfer = new FileTransfer(() => UI.reconnectPassword);
+        document.getElementById('noVNC_files_button')
+            .addEventListener('click', UI.toggleFilesPanel);
+    },
+
+    closeFilesPanel() {
+        document.getElementById('noVNC_files')?.classList.remove('noVNC_open');
+        document.getElementById('noVNC_files_button')?.classList.remove('noVNC_selected');
+    },
+
+    toggleFilesPanel() {
+        if (document.getElementById('noVNC_files').classList.contains('noVNC_open')) {
+            UI.closeFilesPanel();
+            return;
+        }
+        UI.closeAllPanels();
+        UI.openControlbar();
+        document.getElementById('noVNC_files').classList.add('noVNC_open');
+        document.getElementById('noVNC_files_button').classList.add('noVNC_selected');
+        UI.fileTransfer.refresh();
+    },
+
 /* ------^-------
  *  /CLIPBOARD
  * ==============
@@ -1110,6 +1172,8 @@ const UI = {
         const host = UI.getSetting('host');
         const port = UI.getSetting('port');
         const path = UI.getSetting('path');
+        UI.rememberPendingPassword = null;
+        UI.sessionRequest = null;
 
         if (typeof password === 'undefined') {
             password = UI.getSetting('password');
@@ -1148,6 +1212,8 @@ const UI = {
             url = new URL(path, location.href);
             url.protocol = (window.location.protocol === "https:") ? 'wss:' : 'ws:';
         }
+        UI.sameOriginConnection = url.host === window.location.host &&
+            url.pathname === new URL('websockify', window.location.href).pathname;
 
         if (UI.getSetting('keep_device_awake')) {
             UI.wakeLockManager.acquire();
@@ -1239,7 +1305,14 @@ const UI = {
         UI.updateBeforeUnload();
 
         // Do this last because it can only be used on rendered elements
-        UI.rfb.focus();
+        UI.updateImeInput();
+        const password = UI.rememberPendingPassword;
+        UI.rememberPendingPassword = null;
+        if (password !== null) {
+            UI.browserLoginTask = BrowserSession.remember(password).catch(() => {
+                UI.showStatus(_("Connected, but browser login could not be remembered."), 'warning');
+            });
+        }
     },
 
     disconnectFinished(e) {
@@ -1252,6 +1325,16 @@ const UI = {
         UI.connected = false;
 
         UI.rfb = undefined;
+        UI.rememberPendingPassword = null;
+        UI.sessionRequest = null;
+        clearTimeout(UI.pacedKeysTimer);
+        UI.pacedKeysTimer = null;
+        UI.pacedKeys = [];
+        clearTimeout(UI.imeCommitTimer);
+        UI.imeCommitTimer = null;
+        UI.imeComposing = false;
+        UI.keyboardinputReset();
+        UI.hideImePreedit();
         UI.wakeLockManager.release();
 
         if (!e.detail.clean) {
@@ -1352,11 +1435,34 @@ const UI = {
  *   PASSWORD
  * ------v------*/
 
-    credentials(e) {
+    async credentials(e) {
+        const rfb = UI.rfb;
+        if (UI.sameOriginConnection && e.detail.challenge) {
+            // The gateway answers the challenge using the HttpOnly cookie.
+            // Do not send the password back to the browser on later visits.
+            if (UI.sessionRequest === rfb) return;
+            UI.sessionRequest = rfb;
+            try {
+                const response = await BrowserSession.respond(e.detail.challenge);
+                if (UI.rfb !== rfb) return;
+                rfb.sendCredentials({ vncResponse: response });
+                return;
+            } catch {
+                if (UI.rfb !== rfb) return;
+            } finally {
+                if (UI.sessionRequest === rfb) UI.sessionRequest = null;
+            }
+        }
+        UI.showCredentials(e);
+    },
+
+    showCredentials(e) {
         // FIXME: handle more types
 
         document.getElementById("noVNC_username_block").classList.remove("noVNC_hidden");
         document.getElementById("noVNC_password_block").classList.remove("noVNC_hidden");
+        document.getElementById('noVNC_remember_browser_block')
+            .classList.toggle('noVNC_hidden', !UI.sameOriginConnection || !e.detail.challenge);
 
         let inputFocus = "none";
         if (e.detail.types.indexOf("username") === -1) {
@@ -1391,10 +1497,26 @@ const UI = {
         // Clear the input after reading the password
         inputElemPassword.value = "";
 
-        UI.rfb.sendCredentials({ username: username, password: password });
         UI.reconnectPassword = password;
+        UI.rememberPendingPassword = UI.sameOriginConnection &&
+            !document.getElementById('noVNC_remember_browser_block').classList.contains('noVNC_hidden') &&
+            document.getElementById('noVNC_remember_browser').checked ? password : null;
+        UI.rfb.sendCredentials({ username: username, password: password });
         document.getElementById('noVNC_credentials_dlg')
             .classList.remove('noVNC_open');
+    },
+
+    async forgetBrowser() {
+        try {
+            await UI.browserLoginTask;
+            await BrowserSession.forget();
+            UI.reconnectPassword = null;
+            UI.rememberPendingPassword = null;
+            UI.fileTransfer._autoPassword = false;
+            UI.showStatus(_("Browser login forgotten. Enter your password next time."));
+        } catch {
+            UI.showStatus(_("Could not forget browser login. Please try again."), 'error');
+        }
     },
 
 /* ------^-------
@@ -1622,7 +1744,7 @@ const UI = {
         document.getElementById('noVNC_keyboard_button')
             .classList.remove("noVNC_selected");
         if (UI.rfb) {
-            UI.rfb.focusOnClick = true;
+            UI.rfb.focusOnClick = !UI.imeInputActive();
         }
     },
 
@@ -1663,7 +1785,77 @@ const UI = {
     keyEvent(keysym, code, down) {
         if (!UI.rfb) return;
 
-        UI.rfb.sendKey(keysym, code, down);
+        // A key pressed immediately after committing must follow that text,
+        // even if the browser has not run the compositionend fallback yet.
+        if (UI.imeCommitTimer !== null) {
+            UI.keyInput({ target: document.getElementById('noVNC_keyboardinput') });
+        }
+
+        // Paced as well, so keys can't overtake text still being sent
+        UI.sendKeyPaced(keysym, code, down);
+    },
+
+    // The server maps characters missing from its keymap to a spare keycode
+    // on the fly, and may remap that same keycode for the next such
+    // character before the application has looked up the first one. Space
+    // those characters out so text committed by an input method in one go
+    // arrives intact instead of repeating its last character.
+    sendKeyPaced(keysym, code, down) {
+        UI.pacedKeys.push([keysym, code, down]);
+        if (UI.pacedKeysTimer === null) {
+            UI.flushPacedKeys();
+        }
+    },
+
+    sendTextPaced(text) {
+        UI.textInputRevision++;
+        const last = UI.pacedKeys.length - 1;
+        if (typeof UI.pacedKeys[last] === 'string') {
+            UI.pacedKeys[last] += text;
+        } else {
+            UI.pacedKeys.push(text);
+        }
+        if (UI.pacedKeysTimer === null) {
+            UI.flushPacedKeys();
+        }
+    },
+
+    flushPacedKeys() {
+        UI.pacedKeysTimer = null;
+        while (UI.pacedKeys.length > 0) {
+            if (!UI.rfb) {
+                UI.pacedKeys = [];
+                return;
+            }
+
+            const next = UI.pacedKeys.shift();
+            if (typeof next === 'string') {
+                if (UI.rfb.pasteText(next)) {
+                    // Let the application consume the paste before changing
+                    // the clipboard or sending a following Enter/Backspace.
+                    UI.pacedKeysTimer = setTimeout(UI.flushPacedKeys,
+                                                   UI.textPasteDelay);
+                    return;
+                }
+                UI.pacedKeys.unshift(...[...next].map(ch =>
+                    [keysyms.lookup(ch.codePointAt(0)), undefined, undefined]));
+                continue;
+            }
+            const [keysym, code, down] = next;
+            UI.rfb.sendKey(keysym, code, down);
+
+            // Latin-1 and function keys are always in the keymap
+            const unmapped = (keysym > 0xff && keysym < 0xfe00) ||
+                             keysym > 0xffff;
+            // Keep the interval even when the queue is currently empty:
+            // keyInput() enqueues each character separately. Otherwise every
+            // character is flushed immediately and pacing never takes effect.
+            if (unmapped && down !== false) {
+                UI.pacedKeysTimer = setTimeout(UI.flushPacedKeys,
+                                               UI.pacedKeyDelay);
+                return;
+            }
+        }
     },
 
     // When normal keyboard events are left uncought, use the input events from
@@ -1673,6 +1865,12 @@ const UI = {
     keyInput(event) {
 
         if (!UI.rfb) return;
+
+        // Wait for committed text. The composition state also covers browsers
+        // that omit isComposing or clear it before compositionend.
+        if (UI.imeComposing || event.isComposing) return;
+        clearTimeout(UI.imeCommitTimer);
+        UI.imeCommitTimer = null;
 
         const newValue = event.target.value;
 
@@ -1690,27 +1888,30 @@ const UI = {
             // selectionStart is undefined in Google Chrome
             newLen = newValue.length;
         }
-        const oldLen = oldValue.length;
-
-        let inputs = newLen - oldLen;
-        let backspaces = inputs < 0 ? -inputs : 0;
 
         // Compare the old string with the new to account for
-        // text-corrections or other input that modify existing text
-        for (let i = 0; i < Math.min(oldLen, newLen); i++) {
-            if (newValue.charAt(i) != oldValue.charAt(i)) {
-                inputs = newLen - i;
-                backspaces = oldLen - i;
-                break;
-            }
+        // text-corrections. Compare code points so a shared high surrogate
+        // in two different emoji cannot split the replacement character.
+        const oldChars = [...oldValue];
+        const newChars = [...newValue];
+        let unchanged = 0;
+        while (unchanged < Math.min(oldChars.length, newChars.length) &&
+               oldChars[unchanged] === newChars[unchanged]) {
+            unchanged++;
         }
 
-        // Send the key events
-        for (let i = 0; i < backspaces; i++) {
-            UI.rfb.sendKey(KeyTable.XK_BackSpace, "Backspace");
+        // Send the key events, per character rather than per UTF-16 code
+        // unit so that emoji and other astral characters arrive intact
+        for (let i = unchanged; i < oldChars.length; i++) {
+            UI.sendKeyPaced(KeyTable.XK_BackSpace, "Backspace");
         }
-        for (let i = newLen - inputs; i < newLen; i++) {
-            UI.rfb.sendKey(keysyms.lookup(newValue.charCodeAt(i)));
+        const inserted = newChars.slice(unchanged);
+        if (inserted.some(ch => ch.codePointAt(0) > 0xff)) {
+            UI.sendTextPaced(inserted.join(''));
+        } else {
+            for (const ch of inserted) {
+                UI.sendKeyPaced(keysyms.lookup(ch.codePointAt(0)));
+            }
         }
 
         // Control the text content length in the keyboardinput element
@@ -1729,6 +1930,120 @@ const UI = {
         } else {
             UI.lastKeyboardinput = newValue;
         }
+    },
+
+    // With IME input, the keyboard focus stays on the keyboardinput element
+    // so the browser's local input method can compose text there. The
+    // committed text is then sent through keyInput(), just like the
+    // on-screen keyboard on touch devices.
+    imeInputActive() {
+        return !!UI.rfb && !UI.rfb.viewOnly && UI.getSetting('ime_input');
+    },
+
+    focusKeyboard() {
+        if (!UI.rfb) return;
+
+        if (UI.imeInputActive()) {
+            const input = document.getElementById('noVNC_keyboardinput');
+            input.focus({ preventScroll: true });
+            // keyInput() expects typing to happen at the end of the text
+            const l = input.value.length;
+            input.setSelectionRange(l, l);
+        } else {
+            UI.rfb.focus();
+        }
+    },
+
+    updateImeInput() {
+        if (!UI.rfb) return;
+
+        const active = UI.imeInputActive();
+        const input = document.getElementById('noVNC_keyboardinput');
+
+        document.documentElement.classList.toggle('noVNC_ime_input', active);
+        UI.rfb.focusOnClick = !active && document.activeElement !== input;
+        if (!active) {
+            UI.hideImePreedit();
+        }
+
+        if (UI.connected) {
+            UI.focusKeyboard();
+        }
+    },
+
+    // The async clipboard sends the local clipboard when the screen gets
+    // focus (also when returning to this window), but with IME input the
+    // keyboardinput element has the focus instead
+    async imeInputFocus() {
+        if (!UI.imeInputActive()) return;
+        const rfb = UI.rfb;
+        const revision = UI.textInputRevision;
+        if (await browserAsyncClipboardSupport() !== 'available') return;
+
+        let text;
+        try {
+            text = await navigator.clipboard.readText();
+        } catch (err) {
+            Log.Error("Clipboard read failed: " + err);
+            return;
+        }
+        // Clipboard reads can finish after typing starts. Do not replace
+        // text that is still being pasted, or sync into a new connection.
+        if (UI.rfb === rfb && revision === UI.textInputRevision &&
+            UI.pacedKeysTimer === null) {
+            rfb.clipboardPasteFrom(text);
+        }
+    },
+
+    imeScreenMouseDown(event) {
+        if (!UI.imeInputActive()) return;
+
+        // Keep the input method's candidate window next to where the
+        // user last clicked, which is usually the remote text cursor
+        const input = document.getElementById('noVNC_keyboardinput');
+        input.style.left = event.clientX + 'px';
+        input.style.top = event.clientY + 'px';
+
+        if (document.activeElement !== input) {
+            UI.focusKeyboard();
+        }
+    },
+
+    imeCompositionStart(event) {
+        if (UI.imeCommitTimer !== null) {
+            UI.keyInput(event);
+        }
+        UI.imeComposing = true;
+        UI.imeCompositionUpdate(event);
+    },
+
+    imeCompositionUpdate(event) {
+        if (!UI.imeInputActive()) return;
+
+        const input = document.getElementById('noVNC_keyboardinput');
+        const preedit = document.getElementById('noVNC_ime_preedit');
+        preedit.textContent = event.data || '';
+        preedit.style.left = input.style.left;
+        preedit.style.top = input.style.top;
+        preedit.classList.toggle('noVNC_open', preedit.textContent !== '');
+    },
+
+    imeCompositionEnd(event) {
+        UI.imeComposing = false;
+        UI.hideImePreedit();
+        // Browsers differ on whether the final value and input event precede
+        // or follow compositionend. Prefer the final input event, with a
+        // fallback for input methods that only emit compositionend.
+        UI.imeCommitTimer = setTimeout(() => {
+            UI.imeCommitTimer = null;
+            UI.keyInput(event);
+        }, 0);
+    },
+
+    hideImePreedit() {
+        const preedit = document.getElementById('noVNC_ime_preedit');
+        preedit.classList.remove('noVNC_open');
+        preedit.textContent = '';
     },
 
 /* ------^-------
@@ -1807,12 +2122,12 @@ const UI = {
     sendCtrlAltDel() {
         UI.rfb.sendCtrlAltDel();
         // See below
-        UI.rfb.focus();
+        UI.focusKeyboard();
         UI.idleControlbar();
     },
 
     sendKey(keysym, code, down) {
-        UI.rfb.sendKey(keysym, code, down);
+        UI.sendKeyPaced(keysym, code, down);
 
         // Move focus to the screen in order to be able to use the
         // keyboard right after these extra keys.
@@ -1824,7 +2139,7 @@ const UI = {
             .classList.contains("noVNC_selected")) {
             document.getElementById('noVNC_keyboardinput').focus();
         } else {
-            UI.rfb.focus();
+            UI.focusKeyboard();
         }
         // fade out the controlbar to highlight that
         // the focus has been moved to the screen
@@ -1859,31 +2174,17 @@ const UI = {
             document.getElementById('noVNC_clipboard_button')
                 .classList.remove('noVNC_hidden');
         }
+
+        UI.updateImeInput();
     },
 
     updateClipboard() {
-        browserAsyncClipboardSupport()
-            .then((support) => {
-                if (support === 'unsupported') {
-                    // Use fallback clipboard panel
-                    return;
-                }
-                if (support === 'denied' || support === 'available') {
-                    UI.closeClipboardPanel();
-                    document.getElementById('noVNC_clipboard_button')
-                        .classList.add('noVNC_hidden');
-                    document.getElementById('noVNC_clipboard_button')
-                        .removeEventListener('click', UI.toggleClipboardPanel);
-                    document.getElementById('noVNC_clipboard_text')
-                        .removeEventListener('change', UI.clipboardSend);
-                    if (UI.rfb) {
-                        UI.rfb.removeEventListener('clipboard', UI.clipboardReceive);
-                    }
-                }
-            })
-            .catch(() => {
-                // Treat as unsupported
-            });
+        if (!UI.rfb) return;
+
+        // Keep the manual panel available on HTTPS as well. Automatic
+        // clipboard sync can coexist with it and does not replace its controls.
+        document.getElementById('noVNC_clipboard_button')
+            .classList.toggle('noVNC_hidden', UI.rfb.viewOnly);
     },
 
     updateShowDotCursor() {

@@ -504,6 +504,30 @@ export default class RFB extends EventTargetMixin {
         this._canvas.blur();
     }
 
+    // Paste committed Unicode text without relying on the server's finite
+    // keyboard map. Shift+Insert pastes in X11 browsers, editors and terminals.
+    // Return false when UTF-8 clipboard transfers are unavailable, so callers
+    // can fall back to keysym events.
+    pasteText(text) {
+        if (this._rfbConnectionState !== 'connected' || this._viewOnly ||
+            !this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] ||
+            !this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify] ||
+            !this._clipboardServerCapabilitiesActions[extendedClipboardActionProvide]) {
+            return false;
+        }
+
+        this.clipboardPasteFrom(text);
+        // Provide the complete text now, before the paste shortcut. Otherwise
+        // a later commit could replace _clipboardText before the server asks
+        // for the earlier text.
+        RFB.messages.extendedClipboardProvide(this._sock,
+                                              [extendedClipboardFormatText], [text]);
+        this.sendKey(KeyTable.XK_Shift_L, 'ShiftLeft', true);
+        this.sendKey(KeyTable.XK_Insert, 'Insert');
+        this.sendKey(KeyTable.XK_Shift_L, 'ShiftLeft', false);
+        return true;
+    }
+
     clipboardPasteFrom(text) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
 
@@ -1782,16 +1806,23 @@ export default class RFB extends EventTargetMixin {
     _negotiateStdVNCAuth() {
         if (this._sock.rQwait("auth challenge", 16)) { return false; }
 
-        if (this._rfbCredentials.password === undefined) {
+        if (this._rfbCredentials.password === undefined &&
+            this._rfbCredentials.vncResponse === undefined) {
             this.dispatchEvent(new CustomEvent(
                 "credentialsrequired",
-                { detail: { types: ["password"] } }));
+                { detail: { types: ["password"],
+                            challenge: this._sock.rQpeekBytes(16) } }));
             return false;
         }
 
         // TODO(directxman12): make genDES not require an Array
         const challenge = Array.prototype.slice.call(this._sock.rQshiftBytes(16));
-        const response = RFB.genDES(this._rfbCredentials.password, challenge);
+        const response = this._rfbCredentials.vncResponse ??
+            RFB.genDES(this._rfbCredentials.password, challenge);
+        if (!(response instanceof Uint8Array) || response.length !== 16) {
+            return this._fail("Invalid VNC authentication response");
+        }
+        delete this._rfbCredentials.vncResponse;
         this._sock.sQpushBytes(response);
         this._sock.flush();
         this._rfbInitState = "SecurityResult";
@@ -2335,8 +2366,8 @@ export default class RFB extends EventTargetMixin {
 
     _writeClipboard(text) {
         if (this._viewOnly) return;
-        if (this._asyncClipboard.writeClipboard(text)) return;
-        // Fallback clipboard
+        this._asyncClipboard.writeClipboard(text);
+        // Update the manual panel even when automatic clipboard sync succeeds.
         this.dispatchEvent(
             new CustomEvent("clipboard", {detail: {text: text}})
         );

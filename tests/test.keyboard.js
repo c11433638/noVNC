@@ -44,6 +44,130 @@ describe('Key event handling', function () {
             kbd._handleKeyDown(keyevent('keydown', {code: 'KeyA', key: 'a'}));
             kbd._handleKeyUp(keyevent('keyup', {code: 'KeyA', key: 'a'}));
         });
+
+        it('should ignore printable keydown events from the mobile input field', function () {
+            const input = document.createElement('input');
+            input.id = 'noVNC_keyboardinput';
+            document.body.appendChild(input);
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+
+            const evt = keyevent('keydown', {
+                code: 'KeyA', key: 'a', isComposing: true,
+            });
+            kbd._handleKeyDown(evt);
+
+            expect(kbd.onkeyevent).to.not.have.been.called;
+            // The browser must still insert the text to fire the input event
+            expect(evt.preventDefault).to.not.have.been.called;
+            input.remove();
+        });
+
+        it('should leave IME events without a physical keycode to the browser', function () {
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+            const evt = keyevent('keydown', { key: '你', keyCode: 229 });
+
+            kbd._handleKeyDown(evt);
+
+            expect(kbd.onkeyevent).to.not.have.been.called;
+            expect(evt.preventDefault).to.not.have.been.called;
+        });
+
+        it('should leave virtual text keys without a code to the input handler', function () {
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+            const evt = keyevent('keydown', { key: 'a' });
+
+            kbd._handleKeyDown(evt);
+
+            expect(kbd.onkeyevent).to.not.have.been.called;
+            expect(evt.preventDefault).to.not.have.been.called;
+        });
+
+        it('should leave candidate selection keys to an active IME', function () {
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+            kbd.grab();
+            try {
+                input.dispatchEvent(new CompositionEvent('compositionstart'));
+                for (const key of ['Enter', 'Escape', 'ArrowLeft', 'Backspace']) {
+                    const evt = keyevent('keydown', {
+                        key, code: key, isComposing: false, ctrlKey: true,
+                    });
+                    kbd._handleKeyDown(evt);
+                    expect(evt.preventDefault).to.not.have.been.called;
+                }
+                expect(kbd.onkeyevent).to.not.have.been.called;
+
+                input.dispatchEvent(new CompositionEvent('compositionend'));
+                kbd._handleKeyDown(keyevent('keydown', { key: 'Enter', code: 'Enter' }));
+                expect(kbd.onkeyevent).to.have.been.calledWith(0xff0d, 'Enter', true);
+            } finally {
+                kbd.ungrab();
+            }
+        });
+
+        it('should leave AltGraph text insertion to the input handler', function () {
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+            const evt = keyevent('keydown', {
+                key: '@', code: 'KeyQ', ctrlKey: true, altKey: true, AltGraph: true,
+            });
+
+            kbd._handleKeyDown(evt);
+
+            expect(kbd.onkeyevent).to.not.have.been.called;
+            expect(evt.preventDefault).to.not.have.been.called;
+        });
+
+        it('should preserve shortcuts from the local input field', function () {
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+            const evt = keyevent('keydown', { key: 'c', code: 'KeyC', ctrlKey: true });
+
+            kbd._handleKeyDown(evt);
+
+            expect(kbd.onkeyevent).to.have.been.calledWith(0x63, 'KeyC', true);
+            expect(evt.preventDefault).to.have.been.calledOnce;
+        });
+
+        it('should ignore editing keydown events handled by the mobile input event', function () {
+            const input = document.createElement('input');
+            input.id = 'noVNC_keyboardinput';
+            document.body.appendChild(input);
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+
+            kbd._handleKeyDown(keyevent('keydown', {code: 'Backspace', key: 'Backspace'}));
+
+            expect(kbd.onkeyevent).to.not.have.been.called;
+            input.remove();
+        });
+
+        it('should send Delete from the input field as it never changes its text', function () {
+            const input = document.createElement('input');
+            input.id = 'noVNC_keyboardinput';
+            document.body.appendChild(input);
+            const kbd = new Keyboard(input);
+            kbd.onkeyevent = sinon.spy();
+
+            kbd._handleKeyDown(keyevent('keydown', {code: 'Delete', key: 'Delete'}));
+
+            expect(kbd.onkeyevent).to.have.been.calledOnce;
+            expect(kbd.onkeyevent).to.have.been.calledWith(0xffff, 'Delete', true);
+            input.remove();
+        });
     });
 
     describe('Fake keyup', function () {

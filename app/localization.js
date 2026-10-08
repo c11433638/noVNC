@@ -20,12 +20,12 @@ export class Localizer {
     }
 
     // Configure suitable language based on user preferences
-    async setup(supportedLanguages, baseURL) {
+    async setup(supportedLanguages, baseURL, version = '') {
         this.language = 'en'; // Default: US English
         this._dictionary = undefined;
 
         this._setupLanguage(supportedLanguages);
-        await this._setupDictionary(baseURL);
+        await this._setupDictionary(baseURL, version);
     }
 
     _setupLanguage(supportedLanguages) {
@@ -89,7 +89,7 @@ export class Localizer {
         }
     }
 
-    async _setupDictionary(baseURL) {
+    async _setupDictionary(baseURL, version = '') {
         if (baseURL) {
             if (!baseURL.endsWith("/")) {
                 baseURL = baseURL + "/";
@@ -102,7 +102,8 @@ export class Localizer {
             return;
         }
 
-        let response = await fetch(baseURL + this.language + ".json");
+        const suffix = version ? '?v=' + encodeURIComponent(version) : '';
+        let response = await fetch(baseURL + this.language + ".json" + suffix);
         if (!response.ok) {
             throw Error("" + response.status + " " + response.statusText);
         }

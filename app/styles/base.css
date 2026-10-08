@@ -984,7 +984,8 @@ html {
     transform: translateY(0);
 }
 #noVNC_username_block.noVNC_hidden,
-#noVNC_password_block.noVNC_hidden {
+#noVNC_password_block.noVNC_hidden,
+#noVNC_remember_browser_block.noVNC_hidden {
     display: none;
 }
 
@@ -1046,6 +1047,68 @@ html {
     -webkit-user-select: none;
 }
 
+/* Make the default controls comfortable to use on phone-sized screens. */
+@media (max-width: 700px) and (any-pointer: coarse) {
+    #noVNC_control_bar {
+        border-radius: 14px 14px 0 0;
+    }
+
+    #noVNC_control_bar > .noVNC_scroll {
+        box-sizing: border-box;
+        width: 100vw;
+        min-height: 62px;
+        padding: 9px 12px;
+        gap: 0 12px;
+        justify-content: space-around;
+        overscroll-behavior: contain;
+    }
+
+    #noVNC_control_bar .noVNC_button {
+        flex: 0 0 44px;
+        width: 44px;
+        height: 44px;
+        padding: 8px;
+        box-sizing: border-box;
+    }
+
+    #noVNC_control_bar .noVNC_logo,
+    .noVNC_logo + hr {
+        display: none;
+    }
+
+    #noVNC_control_bar_handle {
+        top: -14px;
+        left: 0;
+        width: 100%;
+        height: 28px;
+        transform: none;
+        border-radius: 14px 14px 0 0;
+    }
+
+    #noVNC_control_bar_handle::after {
+        top: 10px;
+        left: calc(50% - 5px);
+        right: auto;
+        transform: rotate(-90deg);
+    }
+
+    #noVNC_control_bar.noVNC_open #noVNC_control_bar_handle::after {
+        transform: rotate(90deg);
+    }
+
+    .noVNC_panel {
+        width: min(92vw, 420px);
+        max-width: 92vw;
+        max-height: calc(100vh - 90px);
+        padding: 14px;
+    }
+
+    .noVNC_bottom .noVNC_panel,
+    .noVNC_bottom .noVNC_panel.noVNC_open {
+        transform: translateY(-62px);
+    }
+}
+
 #noVNC_keyboardinput {
     width: 1px;
     height: 1px;
@@ -1056,6 +1119,158 @@ html {
     left: -40px;
     z-index: -1;
     ime-mode: disabled;
+}
+
+/* Local input method: follow the last click so the candidate window
+   shows up near the remote text cursor. */
+:root.noVNC_ime_input #noVNC_keyboardinput {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    height: 24px;
+    font-size: 16px;
+    line-height: 24px;
+    opacity: 0;
+    ime-mode: auto;
+}
+
+#noVNC_ime_preedit {
+    display: none;
+    position: fixed;
+    z-index: 5;
+    transform: translateY(-100%);
+    padding: 2px 6px;
+    border: 1px solid #888;
+    border-radius: 4px;
+    background-color: #fff;
+    color: #000;
+    font-size: 16px;
+    line-height: 24px;
+    white-space: pre;
+    pointer-events: none;
+}
+#noVNC_ime_preedit.noVNC_open {
+    display: block;
+}
+
+/* File transfers */
+#noVNC_files {
+    width: 480px;
+}
+#noVNC_files_root,
+#noVNC_files_path,
+#noVNC_files_status {
+    overflow-wrap: anywhere;
+}
+#noVNC_files_browser > p {
+    margin: 8px 0;
+}
+#noVNC_files_root {
+    display: block;
+    padding: 8px;
+    background: #f1f3f5;
+    border-radius: 5px;
+}
+.noVNC_files_actions,
+.noVNC_files_navigation {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+}
+.noVNC_files_navigation code {
+    min-width: 0;
+}
+#noVNC_files button {
+    flex-shrink: 0;
+    min-height: 36px;
+    cursor: pointer;
+}
+#noVNC_files button:disabled {
+    cursor: default;
+}
+#noVNC_files .noVNC_files_upload {
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    margin: 0;
+    padding: 0 12px;
+    border-radius: 5px;
+    background: var(--novnc-blue);
+    color: white;
+}
+.noVNC_files_upload:focus-within {
+    outline: 2px solid #555;
+    outline-offset: 2px;
+}
+#noVNC_files_input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+}
+.noVNC_files_upload:has(input:disabled) {
+    opacity: 0.5;
+}
+#noVNC_files_limit,
+.noVNC_files_size {
+    color: #666;
+    font-size: 12px;
+}
+#noVNC_files_list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 240px;
+    overflow: auto;
+}
+#noVNC_files_list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
+}
+.noVNC_files_name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.noVNC_files_size {
+    flex-shrink: 0;
+}
+#noVNC_files_progress {
+    display: block;
+    width: 100%;
+    height: 16px;
+}
+#noVNC_files_progress_text {
+    flex: 1;
+    font-size: 12px;
+}
+.noVNC_files_error {
+    color: #b42318;
+}
+@media (max-width: 540px) {
+    #noVNC_files {
+        width: calc(100vw - 32px);
+        font-size: 14px;
+    }
+    :is(.noVNC_top, .noVNC_bottom) #noVNC_files {
+        max-width: calc(100vw - 32px);
+    }
+    #noVNC_files_list {
+        max-height: 180px;
+    }
+    .noVNC_files_size {
+        display: none;
+    }
 }
 
 /*Default noVNC logo.*/

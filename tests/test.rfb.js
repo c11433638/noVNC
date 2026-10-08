@@ -539,6 +539,58 @@ describe('Remote Frame Buffer protocol client', function () {
             });
         });
 
+        describe('#pasteText', function () {
+            beforeEach(function () {
+                client._clipboardServerCapabilitiesFormats[1] = true;
+                client._clipboardServerCapabilitiesActions[1 << 27] = true;
+                client._clipboardServerCapabilitiesActions[1 << 28] = true;
+            });
+
+            it('should provide complete UTF-8 text before the paste shortcut', function () {
+                const notify = sinon.spy(RFB.messages, 'extendedClipboardNotify');
+                const provide = sinon.spy(RFB.messages, 'extendedClipboardProvide');
+                const send = sinon.spy(client, 'sendKey');
+                try {
+                    expect(client.pasteText('你好😀')).to.equal(true);
+
+                    expect(notify).to.have.been.calledWith(client._sock, [1]);
+                    expect(provide).to.have.been.calledWith(client._sock, [1], ['你好😀']);
+                    expect(notify).to.have.been.calledBefore(provide);
+                    expect(provide).to.have.been.calledBefore(send);
+                    expect(send.getCall(0)).to.have.been.calledWith(KeyTable.XK_Shift_L, 'ShiftLeft', true);
+                    expect(send.getCall(1)).to.have.been.calledWith(KeyTable.XK_Insert, 'Insert');
+                    expect(send.lastCall).to.have.been.calledWith(KeyTable.XK_Shift_L, 'ShiftLeft', false);
+                } finally {
+                    notify.restore();
+                    provide.restore();
+                    send.restore();
+                }
+            });
+
+            it('should allow a keysym fallback when UTF-8 clipboard support is missing', function () {
+                client._clipboardServerCapabilitiesFormats[1] = false;
+
+                expect(client.pasteText('中文')).to.equal(false);
+                expect(client._sock).to.have.sent(new Uint8Array([]));
+            });
+
+            it('should allow a fallback when proactive Provide is unavailable', function () {
+                client._clipboardServerCapabilitiesActions[1 << 28] = false;
+
+                expect(client.pasteText('中文')).to.equal(false);
+                expect(client._sock).to.have.sent(new Uint8Array([]));
+            });
+
+            it('should not paste while disconnected or in view-only mode', function () {
+                client._viewOnly = true;
+                expect(client.pasteText('中文')).to.equal(false);
+                client._viewOnly = false;
+                client._rfbConnectionState = 'connecting';
+                expect(client.pasteText('中文')).to.equal(false);
+                expect(client._sock).to.have.sent(new Uint8Array([]));
+            });
+        });
+
         describe('#clipboardPasteFrom', function () {
             describe('Clipboard update handling', function () {
                 beforeEach(function () {
@@ -1615,6 +1667,7 @@ describe('Remote Frame Buffer protocol client', function () {
 
                     expect(spy).to.have.been.calledOnce;
                     expect(spy.args[0][0].detail.types).to.have.members(["password"]);
+                    expect(Array.from(spy.args[0][0].detail.challenge)).to.deep.equal(challenge);
                 });
 
                 it('should encrypt the password with DES and then send it back', function () {
@@ -1631,6 +1684,18 @@ describe('Remote Frame Buffer protocol client', function () {
 
                     const desPass = RFB.genDES('passwd', challenge);
                     expect(client._sock).to.have.sent(new Uint8Array(desPass));
+                });
+
+                it('should resume classic VNC authentication with a gateway response', function () {
+                    const response = RFB.genDES('passwd', Array.from({ length: 16 }, (_, i) => i));
+                    sendSecurity(2, client);
+                    client._sock._websocket._getSentData();
+                    client._sock._websocket._receiveData(Uint8Array.from({ length: 16 }, (_, i) => i));
+                    client.sendCredentials({ vncResponse: response });
+                    clock.tick();
+                    expect(client._sock).to.have.sent(response);
+                    expect(client._rfbInitState).to.equal('SecurityResult');
+                    expect(client._rfbCredentials.vncResponse).to.equal(undefined);
                 });
 
                 it('should transition to SecurityResult immediately after sending the password', function () {
@@ -3467,7 +3532,7 @@ describe('Remote Frame Buffer protocol client', function () {
         });
 
         describe('Normal clipboard handling receive', function () {
-            it('should not dispatch a clipboard event following successful async write clipboard', async function () {
+            it('should update the manual clipboard after a successful async clipboard write', async function () {
                 client._viewOnly = false;
                 client._asyncClipboard = {
                     writeClipboard: sinon.stub().returns(true),
@@ -3484,9 +3549,9 @@ describe('Remote Frame Buffer protocol client', function () {
                 expect(client._asyncClipboard.writeClipboard.calledOnceWith(
                     expectedStr
                 )).to.be.true;
-                expect(dispatchEventSpy.calledWith(
-                    new CustomEvent("clipboard", {detail: {text: expectedStr}})
-                )).to.be.false;
+                expect(dispatchEventSpy).to.have.been.calledOnce;
+                expect(dispatchEventSpy.firstCall.args[0].type).to.equal('clipboard');
+                expect(dispatchEventSpy.firstCall.args[0].detail.text).to.equal(expectedStr);
             });
 
             it('should dispatch a clipboard event following unsuccessful async write clipboard', async function () {
@@ -3560,7 +3625,7 @@ describe('Remote Frame Buffer protocol client', function () {
                     client._sock._websocket._receiveData(new Uint8Array(data));
                 });
 
-                it('should not dispatch a clipboard event following successful async write clipboard', async function () {
+                it('should update the manual clipboard after a successful extended clipboard write', async function () {
                     client._viewOnly = false;
                     client._asyncClipboard = {
                         writeClipboard: sinon.stub().returns(true),
@@ -3585,9 +3650,9 @@ describe('Remote Frame Buffer protocol client', function () {
                     expect(client._asyncClipboard.writeClipboard.calledOnceWith(
                         expectedData
                     )).to.be.true;
-                    expect(dispatchEventSpy.calledOnceWith(
-                        new CustomEvent("clipboard", {detail: {text: expectedData}})
-                    )).to.be.false;
+                    expect(dispatchEventSpy).to.have.been.calledOnce;
+                    expect(dispatchEventSpy.firstCall.args[0].type).to.equal('clipboard');
+                    expect(dispatchEventSpy.firstCall.args[0].detail.text).to.equal(expectedData);
                 });
                 it('should dispatch a clipboard event following unsuccessful async write clipboard', async function () {
                     client._viewOnly = false;

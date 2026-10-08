@@ -136,6 +136,10 @@ protocol stream.
 [`RFB.clipboardPasteFrom()`](#rfbclipboardpastefrom)
   - Send clipboard contents to server.
 
+[`RFB.pasteText()`](#rfbpastetext)
+  - Send complete UTF-8 text to the remote clipboard and invoke
+    Shift+Insert to insert it in the focused application.
+
 [`RFB.disconnect()`](#rfbdisconnect)
   - Disconnect from the server.
 
@@ -217,6 +221,7 @@ new RFB(target, urlOrChannel, options);
         | ------------ | ----------- | -----------
         | `"username"` | `DOMString` | The user that authenticates
         | `"password"` | `DOMString` | Password for the user
+        | `"vncResponse"` | `Uint8Array` | Optional 16-byte response to a classic VNC authentication challenge
         | `"target"`   | `DOMString` | Target machine or session
 
     `repeaterID`
@@ -256,6 +261,10 @@ The `credentialsrequired` event is fired when the server requests more
 credentials than were specified to [`RFB()`](#rfb-1). The `detail`
 property is an `Object` containing the property `types` which is an
 `Array` of `DOMString` listing the credentials that are required.
+For classic VNC authentication, `detail.challenge` also contains a copy of
+the 16-byte challenge as a `Uint8Array`. An authenticated same-origin
+gateway may answer this challenge; pass its response to
+`sendCredentials({ vncResponse })` to continue without exposing the password.
 
 #### connect
 
@@ -335,6 +344,17 @@ point.
 ```js
 RFB.blur();
 ```
+
+#### RFB.pasteText()
+
+`RFB.pasteText(text)` transfers a whole string using the extended UTF-8
+clipboard and sends Shift+Insert. It returns `true` when sent and `false`
+when the connection is inactive, view only, or lacks the required clipboard
+extensions. The focused application must support Shift+Insert to paste.
+
+The method replaces the remote clipboard. Callers should serialize pastes
+and subsequent editing keys, allowing the application to finish each paste
+before replacing the clipboard again.
 
 #### RFB.clipboardPasteFrom()
 
