@@ -315,6 +315,89 @@ describe('Key event handling', function () {
         });
     });
 
+    describe('Mac shortcut mapping', function () {
+        let origNavigator;
+        let kbd;
+
+        beforeEach(function () {
+            origNavigator = Object.getOwnPropertyDescriptor(window, 'navigator');
+            Object.defineProperty(window, 'navigator', { value: { platform: 'Mac' } });
+            const input = document.createElement('textarea');
+            input.id = 'noVNC_keyboardinput';
+            kbd = new Keyboard(input);
+            kbd.macShortcuts = true;
+            kbd.onkeyevent = sinon.spy();
+        });
+
+        afterEach(function () {
+            Object.defineProperty(window, 'navigator', origNavigator);
+        });
+
+        for (const platform of ['Mac', 'iPad']) {
+            for (const [side, location, keysym] of [['Left', 1, 0xffe3], ['Right', 2, 0xffe4]]) {
+                it(`should send Command+C as Ctrl+C with matching scan codes on ${platform} (${side})`, function () {
+                    window.navigator.platform = platform;
+                    kbd._handleKeyDown(keyevent('keydown', {
+                        code: 'Meta' + side, key: 'Meta', location, metaKey: true,
+                    }));
+                    const copy = keyevent('keydown', { code: 'KeyC', key: 'c', metaKey: true });
+                    kbd._handleKeyDown(copy);
+                    kbd._handleKeyUp(keyevent('keyup', { code: 'Meta' + side, key: 'Meta' }));
+
+                    expect(kbd.onkeyevent.args.map(args => args.slice(0, 3))).to.deep.equal([
+                        [keysym, 'Control' + side, true],
+                        [0x63, 'KeyC', true], [0x63, 'KeyC', false],
+                        [keysym, 'Control' + side, false],
+                    ]);
+                    expect(copy.preventDefault).to.have.been.calledOnce;
+                    expect(kbd._keyDownList).to.be.empty;
+                });
+            }
+        }
+
+        it('should retain Shift in Command+Shift+Z', function () {
+            kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
+            kbd._handleKeyDown(keyevent('keydown', { code: 'ShiftLeft', key: 'Shift', location: 1, metaKey: true }));
+            kbd._handleKeyDown(keyevent('keydown', { code: 'KeyZ', key: 'Z', metaKey: true, shiftKey: true }));
+            kbd._allKeysUp();
+
+            expect(kbd.onkeyevent.args.map(args => args.slice(0, 3))).to.deep.equal([
+                [0xffe3, 'ControlLeft', true], [0xffe1, 'ShiftLeft', true],
+                [0x5a, 'KeyZ', true], [0x5a, 'KeyZ', false],
+                [0xffe3, 'ControlLeft', false], [0xffe1, 'ShiftLeft', false],
+            ]);
+        });
+
+        for (const releasedFirst of ['MetaLeft', 'ControlLeft']) {
+            it(`should keep Ctrl held when ${releasedFirst} is released first`, function () {
+                kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
+                kbd._handleKeyDown(keyevent('keydown', { code: 'ControlLeft', key: 'Control', location: 1, metaKey: true }));
+                kbd._handleKeyUp(keyevent('keyup', { code: releasedFirst }));
+                expect(kbd.onkeyevent).to.have.been.calledOnceWith(0xffe3, 'ControlLeft', true);
+                kbd._allKeysUp();
+                expect(kbd.onkeyevent).to.have.been.calledTwice;
+                expect(kbd.onkeyevent.lastCall).to.have.been.calledWith(0xffe3, 'ControlLeft', false);
+            });
+        }
+
+        it('should release the old modifier before disabling the mapping', function () {
+            kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
+            kbd.macShortcuts = false;
+            kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
+
+            expect(kbd.onkeyevent.args.map(args => args.slice(0, 3))).to.deep.equal([
+                [0xffe3, 'ControlLeft', true], [0xffe3, 'ControlLeft', false],
+                [0xffe9, 'MetaLeft', true],
+            ]);
+        });
+
+        it('should preserve non-Mac Meta keys even when the setting is enabled', function () {
+            window.navigator.platform = 'Linux';
+            kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
+            expect(kbd.onkeyevent).to.have.been.calledOnceWith(0xffeb, 'MetaLeft', true);
+        });
+    });
+
     describe('Meta key combination on iOS and macOS', function () {
         let origNavigator;
         beforeEach(function () {

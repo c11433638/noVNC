@@ -4325,6 +4325,57 @@ describe('Remote Frame Buffer protocol client', function () {
                                                                         10, 10, 0);
             });
 
+            it('should preserve the remainder of small trackpad events', function () {
+                sendWheelEvent(10, 10, 0, 30);
+                sendWheelEvent(10, 10, 0, 30);
+                expect(pointerEvent).to.have.been.calledTwice;
+                pointerEvent.resetHistory();
+                sendWheelEvent(10, 10, 0, 40);
+                expect(pointerEvent).to.have.been.calledTwice;
+                expect(client._accumulatedWheelDeltaY).to.equal(0);
+            });
+
+            it('should reverse both scroll axes while retaining held buttons', function () {
+                client.wheelReverse = true;
+                sendWheelEvent(10, 10, 50, 50, 0, 0x1);
+                expect(pointerEvent.args.map(args => args[3])).to.deep.equal([
+                    0x21, 0x1, 0x9, 0x1,
+                ]);
+            });
+
+            it('should halve wheel speed by combining normalized notches', function () {
+                client.wheelSpeed = 0.5;
+                sendWheelEvent(10, 10, 0, 400);
+                expect(pointerEvent).to.not.have.been.called;
+                sendWheelEvent(10, 10, 0, 400);
+                expect(pointerEvent).to.have.been.calledTwice;
+            });
+
+            it('should double both wheel axes even for large browser deltas', function () {
+                client.wheelSpeed = 2;
+                sendWheelEvent(10, 10, 400, 400);
+                expect(pointerEvent.args.map(args => args[3])).to.deep.equal([
+                    0x40, 0, 0x40, 0, 0x10, 0, 0x10, 0,
+                ]);
+            });
+
+            it('should clear pending motion when changing scroll preferences', function () {
+                sendWheelEvent(10, 10, 20, 20);
+                client.wheelReverse = true;
+                sendWheelEvent(10, 10, 30, 30);
+                expect(pointerEvent).to.not.have.been.called;
+                client.wheelSpeed = 2;
+                sendWheelEvent(10, 10, 0, 10);
+                expect(pointerEvent).to.not.have.been.called;
+            });
+
+            it('should reject invalid wheel speed multipliers', function () {
+                for (const speed of [0, -1, Infinity, NaN, 5]) {
+                    client.wheelSpeed = speed;
+                    expect(client.wheelSpeed).to.equal(1);
+                }
+            });
+
             it('should handle line based wheel event', function () {
                 sendWheelEvent(10, 10, 0, 3, 1);
 
@@ -4362,6 +4413,31 @@ describe('Remote Frame Buffer protocol client', function () {
         });
 
         describe('Keyboard events', function () {
+            it('should send mapped Command as Ctrl in extended keyboard events', function () {
+                const original = Object.getOwnPropertyDescriptor(window, 'navigator');
+                Object.defineProperty(window, 'navigator', { value: { platform: 'Mac' } });
+                try {
+                    client.macShortcuts = true;
+                    client._qemuExtKeyEventSupported = true;
+                    client._keyboard.grab();
+                    client._canvas.dispatchEvent(new KeyboardEvent('keydown', {
+                        code: 'MetaLeft', key: 'Meta', location: 1, metaKey: true,
+                    }));
+                    client._canvas.dispatchEvent(new KeyboardEvent('keyup', {
+                        code: 'MetaLeft', key: 'Meta', location: 1,
+                    }));
+                    expect(qemuKeyEvent.firstCall).to.have.been.calledWith(client._sock,
+                                                                           KeyTable.XK_Control_L, true, 0x1d);
+                    expect(qemuKeyEvent.secondCall).to.have.been.calledWith(client._sock,
+                                                                            KeyTable.XK_Control_L, false, 0x1d);
+                    expect(qemuKeyEvent).to.have.been.calledTwice;
+                    expect(keyEvent).to.not.have.been.called;
+                } finally {
+                    client._keyboard.ungrab();
+                    Object.defineProperty(window, 'navigator', original);
+                }
+            });
+
             it('should send a key message on a key press', function () {
                 let esock = new Websock();
                 let ews = new FakeWebSocket();

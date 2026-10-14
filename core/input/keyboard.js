@@ -22,6 +22,7 @@ export default class Keyboard {
                                         // (even if they are happy)
         this._altGrArmed = false;       // Windows AltGr detection
         this._isComposing = false;
+        this._macShortcuts = false;
 
         // keep these here so we can refer to them later
         this._eventHandlers = {
@@ -39,6 +40,14 @@ export default class Keyboard {
 
     // ===== PRIVATE METHODS =====
 
+    _getRemoteKeyCode(code) {
+        if (this._macShortcuts && (browser.isMac() || browser.isIOS())) {
+            if (code === 'MetaLeft') return 'ControlLeft';
+            if (code === 'MetaRight') return 'ControlRight';
+        }
+        return code;
+    }
+
     _sendKeyEvent(keysym, code, down, numlock = null, capslock = null) {
         if (down) {
             this._keyDownList[code] = keysym;
@@ -50,10 +59,22 @@ export default class Keyboard {
             delete this._keyDownList[code];
         }
 
+        const remoteCode = this._getRemoteKeyCode(code);
+        // Command and physical Ctrl can hold the same remote modifier.
+        // Releasing either must not release Ctrl while the other is held.
+        if (this._macShortcuts && remoteCode.startsWith('Control')) {
+            for (const pressedCode in this._keyDownList) {
+                if (pressedCode !== code &&
+                    this._getRemoteKeyCode(pressedCode) === remoteCode) {
+                    return;
+                }
+            }
+        }
+
         Log.Debug("onkeyevent " + (down ? "down" : "up") +
                   ", keysym: " + keysym, ", code: " + code +
                   ", numlock: " + numlock + ", capslock: " + capslock);
-        this.onkeyevent(keysym, code, down, numlock, capslock);
+        this.onkeyevent(keysym, remoteCode, down, numlock, capslock);
     }
 
     _getKeyCode(e) {
@@ -163,6 +184,11 @@ export default class Keyboard {
         // server. This method is used by RealVNC and TigerVNC (and
         // possibly others).
         if (browser.isMac() || browser.isIOS()) {
+            if (this._macShortcuts && code === 'MetaLeft') {
+                keysym = KeyTable.XK_Control_L;
+            } else if (this._macShortcuts && code === 'MetaRight') {
+                keysym = KeyTable.XK_Control_R;
+            }
             switch (keysym) {
                 case KeyTable.XK_Super_L:
                     keysym = KeyTable.XK_Alt_L;
@@ -185,10 +211,12 @@ export default class Keyboard {
             keysym = this._keyDownList[code];
         }
 
-        // macOS doesn't send proper key releases if a key is pressed
-        // while meta is held down
+        // macOS omits character key releases while Command is held, but
+        // modifier state changes still arrive (e.g. Command then Shift).
+        const isModifier = ['MetaLeft', 'MetaRight', 'ControlLeft', 'ControlRight',
+                            'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight'].includes(code);
         if ((browser.isMac() || browser.isIOS()) &&
-            (e.metaKey && code !== 'MetaLeft' && code !== 'MetaRight')) {
+            e.metaKey && !isModifier) {
             this._sendKeyEvent(keysym, code, true, numlock, capslock);
             this._sendKeyEvent(keysym, code, false, numlock, capslock);
             stopEvent(e);
@@ -295,6 +323,14 @@ export default class Keyboard {
     }
 
     // ===== PUBLIC METHODS =====
+
+    get macShortcuts() { return this._macShortcuts; }
+    set macShortcuts(enabled) {
+        enabled = !!enabled;
+        if (enabled === this._macShortcuts) return;
+        this._allKeysUp();
+        this._macShortcuts = enabled;
+    }
 
     grab() {
         //Log.Debug(">> Keyboard.grab");

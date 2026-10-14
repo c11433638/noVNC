@@ -52,12 +52,12 @@
     <script type="importmap" data-cfasync="false">
     {
         "imports": {
-            "./app/ui.js": "./app/ui.js?v=20261008b",
+            "./app/ui.js": "./app/ui.js?v=20261014a",
             "./app/browser-session.js": "./app/browser-session.js?v=20261008b",
             "./app/file-transfer.js": "./app/file-transfer.js?v=20261008a",
             "./app/localization.js": "./app/localization.js?v=20261008b",
-            "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261008a",
-            "./core/rfb.js": "./core/rfb.js?v=20261008b"
+            "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261014a",
+            "./core/rfb.js": "./core/rfb.js?v=20261014a"
         }
     }
     </script>
@@ -281,6 +281,29 @@
                                    class="toggle">
                             Use local input method
                         </label>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_mac_shortcuts" type="checkbox"
+                                   class="toggle">
+                            Use Mac shortcuts (⌘ → Ctrl)
+                        </label>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_wheel_reverse" type="checkbox"
+                                   class="toggle">
+                            Reverse scroll direction
+                        </label>
+                    </li>
+                    <li>
+                        <label for="noVNC_setting_wheel_speed">Scroll speed:</label>
+                        <select id="noVNC_setting_wheel_speed">
+                            <option value="0.5">0.5×</option>
+                            <option value="1">1×</option>
+                            <option value="2">2×</option>
+                            <option value="3">3×</option>
+                        </select>
                     </li>
                     <li><hr></li>
                     <li>

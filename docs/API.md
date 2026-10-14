@@ -66,6 +66,20 @@ protocol stream.
     Value `0` implies low quality and `9` implies high quality.
     Default value is `6`.
 
+`macShortcuts`
+  - Maps macOS/iOS Command to remote Ctrl, including the scan code sent
+    to servers that support extended key events. Disabled in the library
+    by default; the full UI enables it by default on macOS and iOS.
+
+`wheelReverse`
+  - Reverses horizontal and vertical wheel direction. Disabled by default,
+    preserving the client's operating system scroll direction.
+
+`wheelSpeed`
+  - Sets the wheel speed multiplier, greater than `0` and at most `4`.
+    The default is `1`. Small trackpad deltas and fractional steps accumulate;
+    large browser deltas are normalized to one step before applying speed.
+
 `resizeSession`
   - Is a `boolean` indicating if a request to resize the remote session
     should be sent whenever the container changes dimensions. Disabled

@@ -196,6 +196,8 @@ export default class RFB extends EventTargetMixin {
         this._viewportHasMoved = false;
         this._accumulatedWheelDeltaX = 0;
         this._accumulatedWheelDeltaY = 0;
+        this._wheelSpeed = 1;
+        this._wheelReverse = false;
 
         // Gesture state
         this._gestureLastTapTime = null;
@@ -311,6 +313,27 @@ export default class RFB extends EventTargetMixin {
     }
 
     // ===== PROPERTIES =====
+
+    get macShortcuts() { return this._keyboard.macShortcuts; }
+    set macShortcuts(enabled) { this._keyboard.macShortcuts = enabled; }
+
+    get wheelSpeed() { return this._wheelSpeed; }
+    set wheelSpeed(speed) {
+        if (!Number.isFinite(speed) || speed <= 0 || speed > 4) {
+            Log.Error("wheelSpeed must be between 0 (exclusive) and 4");
+            return;
+        }
+        this._wheelSpeed = speed;
+        this._accumulatedWheelDeltaX = 0;
+        this._accumulatedWheelDeltaY = 0;
+    }
+
+    get wheelReverse() { return this._wheelReverse; }
+    set wheelReverse(reverse) {
+        this._wheelReverse = !!reverse;
+        this._accumulatedWheelDeltaX = 0;
+        this._accumulatedWheelDeltaY = 0;
+    }
 
     get viewOnly() { return this._viewOnly; }
     set viewOnly(viewOnly) {
@@ -1278,6 +1301,16 @@ export default class RFB extends EventTargetMixin {
             dY *= WHEEL_LINE_HEIGHT;
         }
 
+        // WheelEvent already reflects the client's natural scrolling setting.
+        if (this._wheelReverse) {
+            dX = -dX;
+            dY = -dY;
+        }
+        // Normalize a wheel notch before applying speed. Browser/OS pixel
+        // deltas vary widely; one large event should not flood the server.
+        dX = Math.sign(dX) * Math.min(Math.abs(dX), WHEEL_STEP) * this._wheelSpeed;
+        dY = Math.sign(dY) * Math.min(Math.abs(dY), WHEEL_STEP) * this._wheelSpeed;
+
         // Mouse wheel events are sent in steps over VNC. This means that the VNC
         // protocol can't handle a wheel event with specific distance or speed.
         // Therefor, if we get a lot of small mouse wheel events we combine them.
@@ -1287,7 +1320,7 @@ export default class RFB extends EventTargetMixin {
 
         // Generate a mouse wheel step event when the accumulated delta
         // for one of the axes is large enough.
-        if (Math.abs(this._accumulatedWheelDeltaX) >= WHEEL_STEP) {
+        while (Math.abs(this._accumulatedWheelDeltaX) >= WHEEL_STEP) {
             if (this._accumulatedWheelDeltaX < 0) {
                 this._handleMouseButton(pos.x, pos.y, bmask | 1 << 5);
                 this._handleMouseButton(pos.x, pos.y, bmask);
@@ -1296,9 +1329,10 @@ export default class RFB extends EventTargetMixin {
                 this._handleMouseButton(pos.x, pos.y, bmask);
             }
 
-            this._accumulatedWheelDeltaX = 0;
+            this._accumulatedWheelDeltaX -=
+                Math.sign(this._accumulatedWheelDeltaX) * WHEEL_STEP;
         }
-        if (Math.abs(this._accumulatedWheelDeltaY) >= WHEEL_STEP) {
+        while (Math.abs(this._accumulatedWheelDeltaY) >= WHEEL_STEP) {
             if (this._accumulatedWheelDeltaY < 0) {
                 this._handleMouseButton(pos.x, pos.y, bmask | 1 << 3);
                 this._handleMouseButton(pos.x, pos.y, bmask);
@@ -1307,7 +1341,8 @@ export default class RFB extends EventTargetMixin {
                 this._handleMouseButton(pos.x, pos.y, bmask);
             }
 
-            this._accumulatedWheelDeltaY = 0;
+            this._accumulatedWheelDeltaY -=
+                Math.sign(this._accumulatedWheelDeltaY) * WHEEL_STEP;
         }
     }
 

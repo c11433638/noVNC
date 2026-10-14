@@ -76,7 +76,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261008b');
+            await l10n.setup(LINGUAS, "app/locale/", '20261014a');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -212,6 +212,9 @@ const UI = {
         UI.initSetting('view_only', false);
         // Touch devices already type through the on-screen keyboard field
         UI.initSetting('ime_input', !isTouchDevice);
+        UI.initSetting('mac_shortcuts', isMac() || isIOS());
+        UI.initSetting('wheel_reverse', false);
+        UI.initSetting('wheel_speed', '1');
         UI.initSetting('show_dot', false);
         UI.initSetting('path', 'websockify');
         UI.initSetting('repeaterID', '');
@@ -284,6 +287,7 @@ const UI = {
             .addEventListener('click', UI.toggleVirtualKeyboard);
 
         UI.touchKeyboard = new Keyboard(document.getElementById('noVNC_keyboardinput'));
+        UI.updateMacShortcuts();
         UI.touchKeyboard.onkeyevent = UI.keyEvent;
         UI.touchKeyboard.grab();
         document.getElementById("noVNC_keyboardinput")
@@ -414,6 +418,12 @@ const UI = {
         UI.addSettingChangeHandler('view_only', UI.updateViewOnly);
         UI.addSettingChangeHandler('ime_input');
         UI.addSettingChangeHandler('ime_input', UI.updateImeInput);
+        UI.addSettingChangeHandler('mac_shortcuts');
+        UI.addSettingChangeHandler('mac_shortcuts', UI.updateMacShortcuts);
+        UI.addSettingChangeHandler('wheel_reverse');
+        UI.addSettingChangeHandler('wheel_reverse', UI.updateWheel);
+        UI.addSettingChangeHandler('wheel_speed');
+        UI.addSettingChangeHandler('wheel_speed', UI.updateWheel);
         UI.addSettingChangeHandler('show_dot');
         UI.addSettingChangeHandler('show_dot', UI.updateShowDotCursor);
         UI.addSettingChangeHandler('keep_device_awake');
@@ -1003,6 +1013,9 @@ const UI = {
         UI.updateSetting('compression');
         UI.updateSetting('shared');
         UI.updateSetting('view_only');
+        UI.updateSetting('mac_shortcuts');
+        UI.updateSetting('wheel_reverse');
+        UI.updateSetting('wheel_speed');
         UI.updateSetting('path');
         UI.updateSetting('repeaterID');
         UI.updateSetting('logging');
@@ -1248,6 +1261,8 @@ const UI = {
         UI.rfb.qualityLevel = parseInt(UI.getSetting('quality'));
         UI.rfb.compressionLevel = parseInt(UI.getSetting('compression'));
         UI.rfb.showDotCursor = UI.getSetting('show_dot');
+        UI.updateMacShortcuts();
+        UI.updateWheel();
 
         UI.updateViewOnly(); // requires UI.rfb
         UI.updateClipboard();
@@ -1952,6 +1967,18 @@ const UI = {
         } else {
             UI.rfb.focus();
         }
+    },
+
+    updateMacShortcuts() {
+        const enabled = UI.getSetting('mac_shortcuts');
+        if (UI.touchKeyboard) UI.touchKeyboard.macShortcuts = enabled;
+        if (UI.rfb) UI.rfb.macShortcuts = enabled;
+    },
+
+    updateWheel() {
+        if (!UI.rfb) return;
+        UI.rfb.wheelReverse = UI.getSetting('wheel_reverse');
+        UI.rfb.wheelSpeed = Number(UI.getSetting('wheel_speed'));
     },
 
     updateImeInput() {
