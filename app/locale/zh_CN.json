@@ -47,6 +47,8 @@
     "Shared mode": "分享模式",
     "View only": "仅查看",
     "Use local input method": "使用本地输入法",
+    "Use clipboard for local input (compatibility)": "通过剪贴板输入（兼容模式）",
+    "Text input failed. Please reconnect and try again.": "文本输入失败，请重新连接后重试。",
     "Use Mac shortcuts (⌘ → Ctrl)": "使用 Mac 快捷键（⌘ → Ctrl）",
     "Reverse scroll direction": "反转滚动方向",
     "Scroll speed:": "滚动速度：",

@@ -32,3 +32,31 @@ export async function respond(challenge) {
 export async function forget() {
     await request('forget-browser', {});
 }
+
+// Reuse the gateway's existing VNC authentication for local desktop input.
+// Unsupported gateways can fall back before any text has been entered.
+export async function typeText(text, password) {
+    const send = async (endpoint, data) => await fetch(new URL('api/files/' + endpoint, window.location.href), {
+        method: 'POST',
+        headers: { 'X-NoVNC-Transfer': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(20000),
+    });
+    const characters = [...text];
+    for (let offset = 0; offset < characters.length; offset += 128) {
+        const data = { text: characters.slice(offset, offset + 128).join('') };
+        let response = await send('input-text', data);
+        if (response.status === 401 && typeof password === 'string') {
+            const login = await send('session', { password });
+            if (!login.ok) throw new Error('Text input authentication failed');
+            response = await send('input-text', data);
+        }
+        if (offset === 0 && [401, 404, 501].includes(response.status)) return false;
+        if (!response.ok || (await response.json()).typed !== true) {
+            throw new Error('Text input delivery failed');
+        }
+    }
+    return true;
+}

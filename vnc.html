@@ -52,8 +52,8 @@
     <script type="importmap" data-cfasync="false">
     {
         "imports": {
-            "./app/ui.js": "./app/ui.js?v=20261014a",
-            "./app/browser-session.js": "./app/browser-session.js?v=20261008b",
+            "./app/ui.js": "./app/ui.js?v=20261014b",
+            "./app/browser-session.js": "./app/browser-session.js?v=20261014b",
             "./app/file-transfer.js": "./app/file-transfer.js?v=20261008a",
             "./app/localization.js": "./app/localization.js?v=20261008b",
             "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261014a",
@@ -280,6 +280,13 @@
                             <input id="noVNC_setting_ime_input" type="checkbox"
                                    class="toggle">
                             Use local input method
+                        </label>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_ime_clipboard" type="checkbox"
+                                   class="toggle">
+                            Use clipboard for local input (compatibility)
                         </label>
                     </li>
                     <li>

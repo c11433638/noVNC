@@ -23,6 +23,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "websockify"))
+sys.path.insert(0, str(REPO / "utils"))
+from text_input import TextInputUnavailable, X11TextInput
 from websockify.websocketproxy import ProxyRequestHandler, WebSocketProxy
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 try:
@@ -377,7 +379,31 @@ class FileRequestHandler(ProxyRequestHandler):
             owner = store.session(self.headers.get("Cookie"))
         except APIError:
             owner = store.session(self.headers.get("Cookie"), browser=True)
-        if endpoint == "list" and self.command == "GET":
+        if endpoint == "input-text" and self.command == "POST":
+            display = getattr(self.server, "text_input_display", None)
+            if not display:
+                raise APIError(501, "text_input_unavailable")
+            text = self.read_json().get("text")
+            if (not isinstance(text, str) or not 0 < len(text) <= 128 or
+                    any(0xd800 <= ord(char) <= 0xdfff or
+                        ord(char) < 32 and char not in "\r\n\t" for char in text)):
+                raise APIError(400, "invalid_request")
+            with open(store.state / "text-input.lock", "a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise APIError(409, "text_input_busy") from None
+                try:
+                    with X11TextInput(display) as input_handler:
+                        input_handler.send(text)
+                except TextInputUnavailable:
+                    raise APIError(501, "text_input_unavailable") from None
+                except Exception:
+                    # Delivery might be partial. Never tell the client to retry
+                    # with another transport and duplicate an entered prefix.
+                    raise APIError(500, "text_input_failed") from None
+            self.reply(200, {"typed": True})
+        elif endpoint == "list" and self.command == "GET":
             self.reply(200, store.listing(param("path")))
         elif endpoint == "download" and self.command == "GET":
             parts = store.components(param("path"))
@@ -470,6 +496,7 @@ def main():
     parser.add_argument("--port", type=int, default=6990)
     parser.add_argument("--target-host", default="127.0.0.1")
     parser.add_argument("--target-port", type=int, default=5901)
+    parser.add_argument("--input-display", help="Local X11 display for clipboard-free text input")
     parser.add_argument("--web", default=str(REPO))
     parser.add_argument("--files", default=str(Path.home() / "Downloads/noVNC"))
     parser.add_argument("--state", default=str(Path.home() / ".local/state/novnc-files"))
@@ -489,6 +516,11 @@ def main():
                             web=args.web, file_only=True, daemon=args.daemon,
                             cert=args.cert, key=args.key, ssl_only=args.ssl_only)
     server.file_store = store
+    server.text_input_display = args.input_display
+    if (server.text_input_display is None and
+            args.target_host in ("127.0.0.1", "localhost", "::1") and
+            5900 <= args.target_port <= 5999):
+        server.text_input_display = f":{args.target_port - 5900}"
     server.start_server()
 
 

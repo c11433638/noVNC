@@ -8,11 +8,17 @@ describe('Local input method', function () {
     let preedit;
     let keyboardButton;
     let previousRfb;
+    let previousSameOrigin;
+    let fetchStub;
     let sends;
 
     beforeEach(function () {
         clock = sinon.useFakeTimers();
         previousRfb = UI.rfb;
+        previousSameOrigin = UI.sameOriginConnection;
+        UI.sameOriginConnection = false;
+        UI.pacedTextPending = null;
+        fetchStub = null;
         sends = [];
         UI.rfb = {
             sendKey: (keysym, code, down) => sends.push([keysym, code, down, Date.now()]),
@@ -30,17 +36,23 @@ describe('Local input method', function () {
         keyboardButton.id = 'noVNC_keyboard_button';
         document.body.append(input, preedit, keyboardButton);
         UI.keyboardinputReset();
+        sinon.stub(UI, 'getSetting').callThrough();
+        UI.getSetting.withArgs('ime_clipboard').returns(false);
         sinon.stub(UI, 'imeInputActive').returns(true);
         sinon.stub(UI, 'idleControlbar');
     });
 
     afterEach(function () {
         UI.rfb = previousRfb;
+        UI.sameOriginConnection = previousSameOrigin;
+        UI.pacedTextPending = null;
+        if (fetchStub) fetchStub.restore();
         UI.pacedKeys = [];
         UI.pacedKeysTimer = null;
         UI.imeComposing = false;
         UI.imeCommitTimer = null;
         UI.imeInputActive.restore();
+        UI.getSetting.restore();
         UI.idleControlbar.restore();
         input.remove();
         preedit.remove();
@@ -62,6 +74,7 @@ describe('Local input method', function () {
     }
 
     it('should pace a whole committed phrase and keep Enter after it', function () {
+        UI.rfb.pasteText.returns(true);
         insert('你好世界');
         UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
         UI.keyEvent(KeyTable.XK_Return, 'Enter', false);
@@ -75,9 +88,75 @@ describe('Local input method', function () {
         expect(sends.slice(0, 4).map(event => event[3])).to.deep.equal([
             0, UI.pacedKeyDelay, UI.pacedKeyDelay * 2, UI.pacedKeyDelay * 3,
         ]);
+        expect(UI.rfb.pasteText).to.not.have.been.called;
+    });
+
+    it('should type mixed Unicode commits without using an available clipboard', function () {
+        UI.rfb.pasteText.returns(true);
+        insert('你好😀abc');
+        UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
+        clock.tick(UI.pacedKeyDelay * 3);
+
+        expect(sentKeysyms()).to.deep.equal([...symbols('你好😀abc'), KeyTable.XK_Return]);
+        expect(UI.rfb.pasteText).to.not.have.been.called;
+    });
+
+    it('should wait for clipboard-free gateway input before sending Enter', async function () {
+        UI.sameOriginConnection = true;
+        let complete;
+        fetchStub = sinon.stub(window, 'fetch').returns(new Promise((resolve) => { complete = resolve; }));
+        insert('你好😀');
+        UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
+        expect(sends).to.be.empty;
+        expect(JSON.parse(fetchStub.firstCall.args[1].body)).to.deep.equal({ text: '你好😀' });
+        complete({ ok: true, status: 200, json: async () => ({ typed: true }) });
+        await UI.pacedTextPending;
+        await Promise.resolve();
+        expect(sentKeysyms()).to.deep.equal([KeyTable.XK_Return]);
+        expect(UI.rfb.pasteText).to.not.have.been.called;
+    });
+
+    it('should fall back to Unicode keys when the gateway lacks text input', async function () {
+        UI.sameOriginConnection = true;
+        fetchStub = sinon.stub(window, 'fetch').resolves({ ok: false, status: 501 });
+        insert('你好');
+        UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
+        await UI.pacedTextPending;
+        await Promise.resolve();
+        clock.tick(UI.pacedKeyDelay * 2);
+        expect(sentKeysyms()).to.deep.equal([...symbols('你好'), KeyTable.XK_Return]);
+        expect(UI.rfb.pasteText).to.not.have.been.called;
+    });
+
+    it('should not replay possibly delivered text after a gateway error', async function () {
+        UI.sameOriginConnection = true;
+        fetchStub = sinon.stub(window, 'fetch').rejects(new Error('Connection lost'));
+        const status = sinon.stub(UI, 'showStatus');
+        try {
+            insert('你好');
+            UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
+            await UI.pacedTextPending.catch(() => {});
+            await Promise.resolve();
+            expect(sends).to.be.empty;
+            expect(UI.pacedKeys).to.be.empty;
+            expect(status).to.have.been.calledOnce;
+        } finally {
+            status.restore();
+        }
+    });
+
+    it('should ignore local input in view-only mode', function () {
+        UI.sameOriginConnection = true;
+        UI.rfb.viewOnly = true;
+        fetchStub = sinon.stub(window, 'fetch');
+        insert('中文');
+        expect(fetchStub).to.not.have.been.called;
+        expect(sends).to.be.empty;
+        expect(UI.rfb.pasteText).to.not.have.been.called;
     });
 
     it('should paste complete Unicode commits and serialize the following key', function () {
+        UI.getSetting.withArgs('ime_clipboard').returns(true);
         UI.rfb.pasteText.returns(true);
         insert('你好😀');
         insert('世界');
@@ -93,6 +172,7 @@ describe('Local input method', function () {
     });
 
     it('should combine consecutive queued commits without crossing editing keys', function () {
+        UI.getSetting.withArgs('ime_clipboard').returns(true);
         UI.rfb.pasteText.returns(true);
         insert('你');
         insert('好');
@@ -103,6 +183,28 @@ describe('Local input method', function () {
 
         expect(UI.rfb.pasteText.args).to.deep.equal([['你'], ['好世界'], ['下一行']]);
         expect(sentKeysyms()).to.deep.equal([KeyTable.XK_Return]);
+    });
+
+    it('should fall back to paced Unicode when clipboard compatibility is unavailable', function () {
+        UI.getSetting.withArgs('ime_clipboard').returns(true);
+        insert('你好😀');
+        UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
+        clock.tick(UI.pacedKeyDelay * 3);
+
+        expect(UI.rfb.pasteText).to.have.been.calledOnceWithExactly('你好😀');
+        expect(sentKeysyms()).to.deep.equal([...symbols('你好😀'), KeyTable.XK_Return]);
+    });
+
+    it('should honor disabling compatibility for text queued behind a paste', function () {
+        UI.getSetting.withArgs('ime_clipboard').returns(true);
+        UI.rfb.pasteText.returns(true);
+        insert('你');
+        insert('好😀');
+        UI.getSetting.withArgs('ime_clipboard').returns(false);
+        clock.tick(UI.textPasteDelay + UI.pacedKeyDelay * 2);
+
+        expect(UI.rfb.pasteText).to.have.been.calledOnceWithExactly('你');
+        expect(sentKeysyms()).to.deep.equal(symbols('好😀'));
     });
 
     it('should keep the interval between separately committed characters', function () {

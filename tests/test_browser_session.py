@@ -39,7 +39,7 @@ class BrowserSessionTests(unittest.TestCase):
 
     def request(self, endpoint, data=None, cookie=None, headers=None, method="POST"):
         handler = object.__new__(gateway.FileRequestHandler)
-        handler.server = SimpleNamespace(file_store=self.store)
+        handler.server = SimpleNamespace(file_store=self.store, text_input_display=":98")
         handler.path = gateway.API + endpoint
         handler.command = method
         handler.client_address = ("127.0.0.1", 12345)
@@ -69,6 +69,24 @@ class BrowserSessionTests(unittest.TestCase):
         with patch.object(gateway.time, "time", return_value=expiry):
             with self.assertRaises(gateway.APIError):
                 self.store.session(self.cookie, browser=True)
+
+    def test_text_input_requires_authentication_and_valid_unicode(self):
+        with patch.object(gateway, "X11TextInput") as native:
+            self.assertEqual(self.request("input-text", {"text": "中文😀"})[0], 401)
+            for text in [None, "", 42, "a" * 129, "bad\x00", "\ud800"]:
+                self.assertEqual(self.request("input-text", {"text": text}, self.cookie)[0], 400)
+            native.assert_not_called()
+            status, data, _ = self.request("input-text", {"text": "中文😀"}, self.cookie)
+            self.assertEqual((status, data), (200, {"typed": True}))
+            native.assert_called_once_with(":98")
+            native.return_value.__enter__.return_value.send.assert_called_once_with("中文😀")
+
+    def test_text_input_distinguishes_unsupported_and_uncertain_delivery(self):
+        with patch.object(gateway, "X11TextInput", side_effect=gateway.TextInputUnavailable()):
+            self.assertEqual(self.request("input-text", {"text": "中文"}, self.cookie)[0], 501)
+        with patch.object(gateway, "X11TextInput") as native:
+            native.return_value.__enter__.return_value.send.side_effect = RuntimeError("Partial delivery")
+            self.assertEqual(self.request("input-text", {"text": "中文"}, self.cookie)[0], 500)
 
     def test_changing_password_invalidates_session(self):
         self.set_password("newpass")

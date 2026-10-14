@@ -51,6 +51,7 @@ const UI = {
 
     pacedKeys: [],
     pacedKeysTimer: null,
+    pacedTextPending: null,
     pacedKeyDelay: 50,
     textPasteDelay: 500,
     textInputRevision: 0,
@@ -76,7 +77,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261014a');
+            await l10n.setup(LINGUAS, "app/locale/", '20261014b');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -212,6 +213,7 @@ const UI = {
         UI.initSetting('view_only', false);
         // Touch devices already type through the on-screen keyboard field
         UI.initSetting('ime_input', !isTouchDevice);
+        UI.initSetting('ime_clipboard', false);
         UI.initSetting('mac_shortcuts', isMac() || isIOS());
         UI.initSetting('wheel_reverse', false);
         UI.initSetting('wheel_speed', '1');
@@ -418,6 +420,7 @@ const UI = {
         UI.addSettingChangeHandler('view_only', UI.updateViewOnly);
         UI.addSettingChangeHandler('ime_input');
         UI.addSettingChangeHandler('ime_input', UI.updateImeInput);
+        UI.addSettingChangeHandler('ime_clipboard');
         UI.addSettingChangeHandler('mac_shortcuts');
         UI.addSettingChangeHandler('mac_shortcuts', UI.updateMacShortcuts);
         UI.addSettingChangeHandler('wheel_reverse');
@@ -1013,6 +1016,7 @@ const UI = {
         UI.updateSetting('compression');
         UI.updateSetting('shared');
         UI.updateSetting('view_only');
+        UI.updateSetting('ime_clipboard');
         UI.updateSetting('mac_shortcuts');
         UI.updateSetting('wheel_reverse');
         UI.updateSetting('wheel_speed');
@@ -1344,6 +1348,7 @@ const UI = {
         UI.sessionRequest = null;
         clearTimeout(UI.pacedKeysTimer);
         UI.pacedKeysTimer = null;
+        UI.pacedTextPending = null;
         UI.pacedKeys = [];
         clearTimeout(UI.imeCommitTimer);
         UI.imeCommitTimer = null;
@@ -1817,7 +1822,7 @@ const UI = {
     // arrives intact instead of repeating its last character.
     sendKeyPaced(keysym, code, down) {
         UI.pacedKeys.push([keysym, code, down]);
-        if (UI.pacedKeysTimer === null) {
+        if (UI.pacedKeysTimer === null && UI.pacedTextPending === null) {
             UI.flushPacedKeys();
         }
     },
@@ -1830,30 +1835,50 @@ const UI = {
         } else {
             UI.pacedKeys.push(text);
         }
-        if (UI.pacedKeysTimer === null) {
+        if (UI.pacedKeysTimer === null && UI.pacedTextPending === null) {
             UI.flushPacedKeys();
         }
     },
 
     flushPacedKeys() {
+        if (UI.pacedTextPending !== null) return;
         UI.pacedKeysTimer = null;
         while (UI.pacedKeys.length > 0) {
-            if (!UI.rfb) {
+            if (!UI.rfb || UI.rfb.viewOnly) {
                 UI.pacedKeys = [];
                 return;
             }
 
             const next = UI.pacedKeys.shift();
             if (typeof next === 'string') {
-                if (UI.rfb.pasteText(next)) {
+                if (!UI.getSetting('ime_clipboard') && UI.sameOriginConnection) {
+                    const rfb = UI.rfb;
+                    const task = BrowserSession.typeText(next, UI.reconnectPassword);
+                    UI.pacedTextPending = task;
+                    task.then((typed) => {
+                        if (UI.rfb !== rfb || UI.pacedTextPending !== task) return;
+                        UI.pacedTextPending = null;
+                        if (!typed) UI.queueTextKeysyms(next);
+                        UI.flushPacedKeys();
+                    }).catch((error) => {
+                        if (UI.rfb !== rfb || UI.pacedTextPending !== task) return;
+                        UI.pacedTextPending = null;
+                        UI.pacedKeys = [];
+                        Log.Error(error);
+                        UI.showStatus(_("Text input failed. Please reconnect and try again."), 'error');
+                    });
+                    return;
+                }
+                // Preserve both clipboards during normal typing. Some remote
+                // applications need clipboard paste as an explicit fallback.
+                if (UI.getSetting('ime_clipboard') && UI.rfb.pasteText(next)) {
                     // Let the application consume the paste before changing
                     // the clipboard or sending a following Enter/Backspace.
                     UI.pacedKeysTimer = setTimeout(UI.flushPacedKeys,
                                                    UI.textPasteDelay);
                     return;
                 }
-                UI.pacedKeys.unshift(...[...next].map(ch =>
-                    [keysyms.lookup(ch.codePointAt(0)), undefined, undefined]));
+                UI.queueTextKeysyms(next);
                 continue;
             }
             const [keysym, code, down] = next;
@@ -1873,13 +1898,18 @@ const UI = {
         }
     },
 
+    queueTextKeysyms(text) {
+        UI.pacedKeys.unshift(...[...text].map(ch =>
+            [keysyms.lookup(ch.codePointAt(0)), undefined, undefined]));
+    },
+
     // When normal keyboard events are left uncought, use the input events from
     // the keyboardinput element instead and generate the corresponding key events.
     // This code is required since some browsers on Android are inconsistent in
     // sending keyCodes in the normal keyboard events when using on screen keyboards.
     keyInput(event) {
 
-        if (!UI.rfb) return;
+        if (!UI.rfb || UI.rfb.viewOnly) return;
 
         // Wait for committed text. The composition state also covers browsers
         // that omit isComposing or clear it before compositionend.
@@ -2017,7 +2047,7 @@ const UI = {
         // Clipboard reads can finish after typing starts. Do not replace
         // text that is still being pasted, or sync into a new connection.
         if (UI.rfb === rfb && revision === UI.textInputRevision &&
-            UI.pacedKeysTimer === null) {
+            UI.pacedKeysTimer === null && UI.pacedTextPending === null) {
             rfb.clipboardPasteFrom(text);
         }
     },
