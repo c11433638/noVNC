@@ -94,7 +94,7 @@ Currently, the following options are available:
 * `compression` - The session compression level. Can be `0` to `9`.
 
 * `fast_mode` - Low bandwidth mode (default `false`). Uses JPEG quality `0`,
-  compression `9`, and server-side grayscale JPEG where supported, without
+  compression `6`, and server-side grayscale JPEG where supported, without
   imposing a frame rate limit. Can be toggled while connected;
   disabling it restores the saved quality/compression settings and color.
   For example: `vnc.html?fast_mode=true`. The checkbox is in Settings.

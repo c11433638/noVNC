@@ -47,7 +47,7 @@
     "Shared mode": "分享模式",
     "Turbo mode (low bandwidth)": "极速模式（省流量）",
     "Lower quality while scrolling or dragging": "滚动或拖动时降低画质",
-    "Grayscale, lower quality, maximum compression. No frame rate limit.": "灰度画面、降低画质、最高压缩，不限制帧数。",
+    "Grayscale, lower quality, higher compression. No frame rate limit.": "灰度画面、降低画质、较高压缩，不限制帧数。",
     "View only": "仅查看",
     "Use local input method": "使用本地输入法",
     "Use clipboard for local input (compatibility)": "通过剪贴板输入（兼容模式）",

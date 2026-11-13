@@ -4,6 +4,12 @@ import ctypes
 import time
 
 
+# Spare keys remapped per batch, and the waits (seconds) around each batch
+BATCH_KEYS = 8
+MAPPING_DELAY = 0.025
+KEY_DELAY = 0.002
+
+
 class TextInputUnavailable(Exception):
     pass
 
@@ -61,29 +67,51 @@ class X11TextInput:
         pressed = ctypes.create_string_buffer(32)
         self.x11.XQueryKeymap(self.display, pressed)
         try:
-            code = next((code for code in range(maximum.value, minimum.value - 1, -1)
-                         if not pressed.raw[code // 8] & (1 << (code % 8)) and
-                         not any(mapping[(code - minimum.value) * width.value + offset]
-                                 for offset in range(width.value))), None)
+            # Highest first: those are the least likely to be bound later.
+            codes = [code for code in range(maximum.value, minimum.value - 1, -1)
+                     if not pressed.raw[code // 8] & (1 << (code % 8)) and
+                     not any(mapping[(code - minimum.value) * width.value + offset]
+                             for offset in range(width.value))][:BATCH_KEYS]
         finally:
             self.x11.XFree(mapping)
-        if code is None:
+        if not codes:
             raise TextInputUnavailable()
         symbols = (ctypes.c_ulong * width.value)()
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         try:
-            for character in text.replace("\r\n", "\n").replace("\r", "\n"):
-                symbols[0] = {"\n": 0xff0d, "\t": 0xff09}.get(character) or (
-                    ord(character) if ord(character) < 256 else 0x01000000 | ord(character))
-                self.x11.XChangeKeyboardMapping(self.display, code, width.value, symbols, 1)
+            position = 0
+            while position < len(text):
+                # Map as many upcoming characters as there are spare keys, so
+                # a whole batch shares one pair of waits instead of each
+                # character paying for its own.
+                assigned = {}
+                end = position
+                while end < len(text) and (text[end] in assigned or len(assigned) < len(codes)):
+                    if text[end] not in assigned:
+                        assigned[text[end]] = codes[len(assigned)]
+                    end += 1
+                for character, code in assigned.items():
+                    symbols[0] = {"\n": 0xff0d, "\t": 0xff09}.get(character) or (
+                        ord(character) if ord(character) < 256 else 0x01000000 | ord(character))
+                    # A lone letter is read as its lower case with Shift for
+                    # the upper case; name both levels so "A" stays "A".
+                    if width.value > 1:
+                        symbols[1] = symbols[0]
+                    self.x11.XChangeKeyboardMapping(self.display, code, width.value, symbols, 1)
                 self.x11.XSync(self.display, 0)
                 # Toolkits must consume the mapping notification before the
-                # key press, and the key press before the next remapping.
-                time.sleep(0.025)
-                self.xtest.XTestFakeKeyEvent(self.display, code, True, 0)
-                self.xtest.XTestFakeKeyEvent(self.display, code, False, 0)
+                # key presses, and the key presses before the next remapping.
+                time.sleep(MAPPING_DELAY)
+                for character in text[position:end]:
+                    self.xtest.XTestFakeKeyEvent(self.display, assigned[character], True, 0)
+                    self.xtest.XTestFakeKeyEvent(self.display, assigned[character], False, 0)
                 self.x11.XSync(self.display, 0)
-                time.sleep(0.025)
+                time.sleep(MAPPING_DELAY + KEY_DELAY * (end - position))
+                position = end
         finally:
             symbols[0] = 0
-            self.x11.XChangeKeyboardMapping(self.display, code, width.value, symbols, 1)
+            if width.value > 1:
+                symbols[1] = 0
+            for code in codes:
+                self.x11.XChangeKeyboardMapping(self.display, code, width.value, symbols, 1)
             self.x11.XSync(self.display, 0)

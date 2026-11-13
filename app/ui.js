@@ -77,7 +77,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261113b');
+            await l10n.setup(LINGUAS, "app/locale/", '20261113e');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }

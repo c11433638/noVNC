@@ -5217,7 +5217,7 @@ describe('Remote Frame Buffer protocol client', function () {
             expect(list).to.include(encodings.encodingTight);
             expect(list).to.include(encodings.pseudoEncodingSubsampGray);
             expect(list).to.include(encodings.pseudoEncodingQualityLevel0);
-            expect(list).to.include(encodings.pseudoEncodingCompressLevel9);
+            expect(list).to.include(encodings.pseudoEncodingCompressLevel0 + 6);
             expect(list).not.to.include(encodings.encodingH264);
             expect(client._canvas.style.filter).to.equal('grayscale(1)');
         });

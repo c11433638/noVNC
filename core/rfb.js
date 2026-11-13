@@ -2402,7 +2402,7 @@ export default class RFB extends EventTargetMixin {
                                                  RFB.motionQualityLevel) :
                    this._qualityLevel));
         encs.push(encodings.pseudoEncodingCompressLevel0 +
-                  (this._fastMode ? 9 : this._compressionLevel));
+                  (this._fastMode ? 6 : this._compressionLevel));
         if (this._fastMode) {
             encs.push(encodings.pseudoEncodingSubsampGray);
         }
