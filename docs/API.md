@@ -16,6 +16,14 @@ protocol stream.
 
 ### Properties
 
+`fastMode`
+  - `boolean`, default: `false`
+  - Enable low bandwidth mode: quality 0, compression 9, Tight grayscale JPEG
+    where supported. Framebuffer updates and input events are not throttled.
+    Changes apply without reconnecting. Disabling
+    the mode restores `qualityLevel` and `compressionLevel` and refreshes the
+    screen in color. Lossless rectangles are desaturated on the client only.
+
 `background`
   - Is a valid CSS [background][mdn-bg] style value indicating which
     background style should be applied to the element containing the

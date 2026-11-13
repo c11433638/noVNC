@@ -5192,6 +5192,96 @@ describe('Remote Frame Buffer protocol client', function () {
         });
     });
 
+    describe('Turbo mode', function () {
+        let client;
+
+        beforeEach(function () {
+            client = makeRFB();
+            client._fbDepth = 24;
+            client._fbWidth = 640;
+            client._fbHeight = 480;
+            sinon.spy(RFB.messages, 'clientEncodings');
+            sinon.spy(RFB.messages, 'fbUpdateRequest');
+            sinon.spy(RFB.messages, 'enableContinuousUpdates');
+        });
+
+        afterEach(function () {
+            RFB.messages.clientEncodings.restore();
+            RFB.messages.fbUpdateRequest.restore();
+            RFB.messages.enableContinuousUpdates.restore();
+        });
+
+        it('should negotiate grayscale JPEG, minimum quality and maximum compression', function () {
+            client.fastMode = true;
+            const list = RFB.messages.clientEncodings.lastCall.args[1];
+            expect(list).to.include(encodings.encodingTight);
+            expect(list).to.include(encodings.pseudoEncodingSubsampGray);
+            expect(list).to.include(encodings.pseudoEncodingQualityLevel0);
+            expect(list).to.include(encodings.pseudoEncodingCompressLevel9);
+            expect(list).not.to.include(encodings.encodingH264);
+            expect(client._canvas.style.filter).to.equal('grayscale(1)');
+        });
+
+        it('should preserve normal settings and restore color with a full refresh', function () {
+            client.qualityLevel = 5;
+            client.compressionLevel = 2;
+            client.fastMode = true;
+            expect(client.qualityLevel).to.equal(5);
+            expect(client.compressionLevel).to.equal(2);
+            client.fastMode = false;
+            const list = RFB.messages.clientEncodings.lastCall.args[1];
+            expect(list).to.include(encodings.pseudoEncodingQualityLevel0 + 5);
+            expect(list).to.include(encodings.pseudoEncodingCompressLevel0 + 2);
+            expect(list).not.to.include(encodings.pseudoEncodingSubsampGray);
+            expect(client._canvas.style.filter).to.equal('');
+            expect(RFB.messages.fbUpdateRequest).to.have.been.calledWith(
+                client._sock, false, 0, 0, 640, 480);
+        });
+
+        it('should retain the preset when normal quality is changed while enabled', function () {
+            client.fastMode = true;
+            client.qualityLevel = 8;
+            const list = RFB.messages.clientEncodings.lastCall.args[1];
+            expect(list).to.include(encodings.pseudoEncodingQualityLevel0);
+            expect(list).not.to.include(encodings.pseudoEncodingQualityLevel0 + 8);
+            client.fastMode = false;
+            expect(RFB.messages.clientEncodings.lastCall.args[1])
+                .to.include(encodings.pseudoEncodingQualityLevel0 + 8);
+        });
+
+        it('should request turbo-mode frames immediately without waiting', function () {
+            client.fastMode = true;
+            sinon.stub(client, '_framebufferUpdate').returns(true);
+            client._sock._websocket._receiveData(new Uint8Array([0]));
+            expect(RFB.messages.fbUpdateRequest).to.have.been.calledOnce;
+            client._sock._websocket._receiveData(new Uint8Array([0]));
+            expect(RFB.messages.fbUpdateRequest).to.have.been.calledTwice;
+            expect(RFB.messages.fbUpdateRequest).to.have.been.calledWith(
+                client._sock, true, 0, 0, 640, 480);
+        });
+
+        it('should enable continuous updates when connecting in turbo mode', function () {
+            client.fastMode = true;
+            client._sock._websocket._receiveData(new Uint8Array([150]));
+            expect(client._supportsContinuousUpdates).to.be.true;
+            expect(client._enabledContinuousUpdates).to.be.true;
+            expect(RFB.messages.enableContinuousUpdates).to.have.been.calledWith(
+                client._sock, true, 0, 0, 640, 480);
+        });
+
+        it('should preserve continuous updates while toggling turbo mode', function () {
+            client._supportsContinuousUpdates = true;
+            client._enabledContinuousUpdates = true;
+            client.fastMode = true;
+            expect(client._enabledContinuousUpdates).to.be.true;
+            client.fastMode = false;
+            expect(client._enabledContinuousUpdates).to.be.true;
+            client.fastMode = true;
+            expect(client._enabledContinuousUpdates).to.be.true;
+            expect(RFB.messages.enableContinuousUpdates).not.to.have.been.called;
+        });
+    });
+
     describe('Quality level setting', function () {
         const defaultQuality = 6;
 

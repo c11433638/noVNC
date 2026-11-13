@@ -83,11 +83,23 @@ Currently, the following options are available:
   it cannot fit in the browser.
 
 * `resize` - How to resize the remote session if it is not the same size as
-  the browser window. Can be one of `off`, `scale` and `remote`.
+  the browser window. Can be one of `off`, `scale` and `remote` (default).
+  Remote resizing follows the browser viewport after connecting; it does not
+  lock the desktop resolution. `vnc-control.sh` leaves startup geometry to
+  TigerVNC unless `VNC_GEOMETRY` is explicitly set. Saved browser settings and URL
+  parameters take precedence over defaults.
 
 * `quality` - The session JPEG quality level. Can be `0` to `9`.
 
 * `compression` - The session compression level. Can be `0` to `9`.
+
+* `fast_mode` - Low bandwidth mode (default `false`). Uses JPEG quality `0`,
+  compression `9`, and server-side grayscale JPEG where supported, without
+  imposing a frame rate limit. Can be toggled while connected;
+  disabling it restores the saved quality/compression settings and color.
+  For example: `vnc.html?fast_mode=true`. The checkbox is in Settings.
+  Lossless rectangles are desaturated locally; their color bytes are still
+  transmitted. The server may ignore JPEG grayscale/compression extensions.
 
 * `logging` - The console log level. Can be one of `error`, `warn`, `info` or
   `debug`.

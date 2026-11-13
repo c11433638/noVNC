@@ -20,6 +20,8 @@ export const encodings = {
 
     pseudoEncodingQualityLevel9: -23,
     pseudoEncodingQualityLevel0: -32,
+    // TightVNC/TigerVNC JPEG chrominance subsampling extension.
+    pseudoEncodingSubsampGray: -765,
     pseudoEncodingDesktopSize: -223,
     pseudoEncodingLastRect: -224,
     pseudoEncodingCursor: -239,

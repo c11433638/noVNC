@@ -52,12 +52,13 @@
     <script type="importmap" data-cfasync="false">
     {
         "imports": {
-            "./app/ui.js": "./app/ui.js?v=20261014b",
+            "./app/ui.js": "./app/ui.js?v=20261113b",
             "./app/browser-session.js": "./app/browser-session.js?v=20261014b",
             "./app/file-transfer.js": "./app/file-transfer.js?v=20261008a",
             "./app/localization.js": "./app/localization.js?v=20261008b",
             "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261014a",
-            "./core/rfb.js": "./core/rfb.js?v=20261014a"
+            "./core/rfb.js": "./core/rfb.js?v=20261113b",
+            "./core/encodings.js": "./core/encodings.js?v=20261110a"
         }
     }
     </script>
@@ -78,7 +79,7 @@
         // cannot change.
 
         try {
-            response = await fetch('./defaults.json');
+            response = await fetch('./defaults.json?v=20261113a', { cache: 'no-cache' });
             if (!response.ok) {
                 throw Error("" + response.status + " " + response.statusText);
             }
@@ -327,6 +328,22 @@
                             <option value="scale">Local scaling</option>
                             <option value="remote">Remote resizing</option>
                         </select>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_fast_mode" type="checkbox"
+                                   class="toggle"
+                                   aria-describedby="noVNC_fast_mode_hint">
+                            Turbo mode (low bandwidth)
+                        </label>
+                        <div id="noVNC_fast_mode_hint">Grayscale, lower quality, maximum compression. No frame rate limit.</div>
+                    </li>
+                    <li>
+                        <label>
+                            <input id="noVNC_setting_dynamic_quality" type="checkbox"
+                                   class="toggle">
+                            Lower quality while scrolling or dragging
+                        </label>
                     </li>
                     <li><hr></li>
                     <li>

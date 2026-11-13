@@ -1128,7 +1128,15 @@ html {
     left: 50%;
     top: 50%;
     height: 24px;
-    font-size: 16px;
+    padding: 0;
+    /* Keep everything on one line with near-zero width. A wrapping 1px
+       wide field puts every character on its own line, so the composition
+       start (which input methods anchor their candidate window to) moves
+       further away with each typed letter. */
+    white-space: pre;
+    overflow: hidden;
+    resize: none;
+    font-size: 1px;
     line-height: 24px;
     opacity: 0;
     ime-mode: auto;

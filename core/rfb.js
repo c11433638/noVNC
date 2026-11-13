@@ -305,11 +305,16 @@ export default class RFB extends EventTargetMixin {
         this._clippingViewport = false;
         this._scaleViewport = false;
         this._resizeSession = false;
+        this._fixedDesktopSize = null;
 
         this._showDotCursor = false;
 
         this._qualityLevel = 6;
         this._compressionLevel = 2;
+        this._fastMode = false;
+        this._dynamicQuality = false;
+        this._motionActive = false;
+        this._motionTimer = null;
     }
 
     // ===== PROPERTIES =====
@@ -389,9 +394,19 @@ export default class RFB extends EventTargetMixin {
     get resizeSession() { return this._resizeSession; }
     set resizeSession(resize) {
         this._resizeSession = resize;
-        if (resize) {
-            this._requestRemoteResize();
+        this._requestRemoteResize();
+    }
+
+    // Desktop size ({w, h}) to restore on the server whenever remote
+    // resizing is disabled, or null to leave the server's size alone
+    get fixedDesktopSize() { return this._fixedDesktopSize; }
+    set fixedDesktopSize(size) {
+        if (size && size.w > 0 && size.h > 0) {
+            this._fixedDesktopSize = { w: size.w, h: size.h };
+        } else {
+            this._fixedDesktopSize = null;
         }
+        this._requestRemoteResize();
     }
 
     get showDotCursor() { return this._showDotCursor; }
@@ -440,6 +455,32 @@ export default class RFB extends EventTargetMixin {
 
         if (this._rfbConnectionState === 'connected') {
             this._sendEncodings();
+        }
+    }
+
+    // Lower the JPEG quality while the user scrolls or drags, and restore
+    // it shortly after. The server then refreshes the idle screen.
+    get dynamicQuality() { return this._dynamicQuality; }
+    set dynamicQuality(enabled) {
+        this._dynamicQuality = !!enabled;
+        if (!this._dynamicQuality) this._endMotion();
+    }
+
+    get fastMode() { return this._fastMode; }
+    set fastMode(enabled) {
+        enabled = !!enabled;
+        if (this._fastMode === enabled) return;
+        this._fastMode = enabled;
+        // Also desaturate lossless rectangles, which do not use JPEG.
+        this._canvas.style.filter = enabled ? 'grayscale(1)' : '';
+
+        if (this._rfbConnectionState !== 'connected') return;
+
+        this._sendEncodings();
+        if (!enabled) {
+            // Replace any grayscale JPEGs already on the screen.
+            RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                         this._fbWidth, this._fbHeight);
         }
     }
 
@@ -660,6 +701,9 @@ export default class RFB extends EventTargetMixin {
     }
 
     _disconnect() {
+        clearTimeout(this._motionTimer);
+        this._motionTimer = null;
+        this._motionActive = false;
         Log.Debug(">> RFB.disconnect");
         this._cursor.detach();
         this._canvas.removeEventListener("gesturestart", this._eventHandlers.handleGesture);
@@ -840,7 +884,7 @@ export default class RFB extends EventTargetMixin {
     // Requests a change of remote desktop size. This message is an extension
     // and may only be sent if we have received an ExtendedDesktopSize message
     _requestRemoteResize() {
-        if (!this._resizeSession) {
+        if (!this._resizeSession && !this._fixedDesktopSize) {
             return;
         }
         if (this._viewOnly) {
@@ -864,7 +908,9 @@ export default class RFB extends EventTargetMixin {
         }
         this._resizeTimeout = null;
 
-        const size = this._screenSize();
+        // Without remote resizing, put the desktop back to its fixed size
+        const size = this._resizeSession ? this._screenSize()
+                                         : this._fixedDesktopSize;
 
         // Do we actually change anything?
         if (size.w === this._fbWidth && size.h === this._fbHeight) {
@@ -1232,6 +1278,8 @@ export default class RFB extends EventTargetMixin {
     }
 
     _handleMouseMove(x, y) {
+        // Dragging a window, scrollbar or selection
+        if (this._mouseButtonMask !== 0) this._noteMotion();
         this._mousePos = { 'x': x, 'y': y };
 
         // Limit many mouse move events to one every MOUSE_MOVE_DELAY ms
@@ -1277,7 +1325,33 @@ export default class RFB extends EventTargetMixin {
         }
     }
 
+    _noteMotion() {
+        if (!this._dynamicQuality || this._fastMode ||
+            this._qualityLevel <= RFB.motionQualityLevel ||
+            this._rfbConnectionState !== 'connected') {
+            return;
+        }
+        clearTimeout(this._motionTimer);
+        this._motionTimer = setTimeout(this._endMotion.bind(this),
+                                       RFB.motionQualityDelay);
+        if (!this._motionActive) {
+            this._motionActive = true;
+            this._sendEncodings();
+        }
+    }
+
+    _endMotion() {
+        clearTimeout(this._motionTimer);
+        this._motionTimer = null;
+        if (!this._motionActive) return;
+        this._motionActive = false;
+        if (this._rfbConnectionState === 'connected') {
+            this._sendEncodings();
+        }
+    }
+
     _handleWheel(ev) {
+        this._noteMotion();
         if (this._rfbConnectionState !== 'connected') { return; }
         if (this._viewOnly) { return; } // View only, skip mouse events
 
@@ -2308,7 +2382,7 @@ export default class RFB extends EventTargetMixin {
         encs.push(encodings.encodingCopyRect);
         // Only supported with full depth support
         if (this._fbDepth == 24) {
-            if (supportsWebCodecsH264Decode) {
+            if (supportsWebCodecsH264Decode && !this._fastMode) {
                 encs.push(encodings.encodingH264);
             }
             encs.push(encodings.encodingTight);
@@ -2322,8 +2396,16 @@ export default class RFB extends EventTargetMixin {
         encs.push(encodings.encodingRaw);
 
         // Psuedo-encoding settings
-        encs.push(encodings.pseudoEncodingQualityLevel0 + this._qualityLevel);
-        encs.push(encodings.pseudoEncodingCompressLevel0 + this._compressionLevel);
+        encs.push(encodings.pseudoEncodingQualityLevel0 +
+                  (this._fastMode ? 0 :
+                   this._motionActive ? Math.min(this._qualityLevel,
+                                                 RFB.motionQualityLevel) :
+                   this._qualityLevel));
+        encs.push(encodings.pseudoEncodingCompressLevel0 +
+                  (this._fastMode ? 9 : this._compressionLevel));
+        if (this._fastMode) {
+            encs.push(encodings.pseudoEncodingSubsampGray);
+        }
 
         encs.push(encodings.pseudoEncodingDesktopSize);
         encs.push(encodings.pseudoEncodingLastRect);
@@ -3154,6 +3236,11 @@ export default class RFB extends EventTargetMixin {
 }
 
 // Class Methods
+// JPEG quality used while scrolling or dragging with dynamicQuality, and
+// how long (ms) after the last such input the normal quality returns
+RFB.motionQualityLevel = 1;
+RFB.motionQualityDelay = 500;
+
 RFB.messages = {
     keyEvent(sock, keysym, down) {
         sock.sQpush8(4); // msg-type

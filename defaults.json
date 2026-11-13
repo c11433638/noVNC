@@ -1,1 +1,7 @@
-{}
+{
+    "quality": 5,
+    "resize": "scale",
+    "desktop_size": "1600x900",
+    "reconnect": true,
+    "reconnect_delay": 2000
+}

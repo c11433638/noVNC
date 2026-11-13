@@ -77,7 +77,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261014b');
+            await l10n.setup(LINGUAS, "app/locale/", '20261113a');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -202,12 +202,13 @@ const UI = {
         UI.initSetting('encrypt', (window.location.protocol === "https:"));
         UI.initSetting('password');
         UI.initSetting('autoconnect', false);
-        const smallTouchScreen = isTouchDevice &&
-            Math.min(window.innerWidth, window.innerHeight) <= 700;
         UI.initSetting('view_clip', false);
-        UI.initSetting('resize', smallTouchScreen ? 'scale' : 'off');
+        UI.initSetting('resize', 'remote');
         UI.initSetting('quality', 6);
         UI.initSetting('compression', 2);
+        UI.initSetting('fast_mode', false);
+        UI.initSetting('dynamic_quality', true);
+        UI.updateFastMode();
         UI.initSetting('shared', true);
         UI.initSetting('bell', 'on');
         UI.initSetting('view_only', false);
@@ -413,6 +414,10 @@ const UI = {
         UI.addSettingChangeHandler('quality', UI.updateQuality);
         UI.addSettingChangeHandler('compression');
         UI.addSettingChangeHandler('compression', UI.updateCompression);
+        UI.addSettingChangeHandler('fast_mode');
+        UI.addSettingChangeHandler('fast_mode', UI.updateFastMode);
+        UI.addSettingChangeHandler('dynamic_quality');
+        UI.addSettingChangeHandler('dynamic_quality', UI.updateDynamicQuality);
         UI.addSettingChangeHandler('view_clip');
         UI.addSettingChangeHandler('view_clip', UI.updateViewClip);
         UI.addSettingChangeHandler('shared');
@@ -1014,6 +1019,9 @@ const UI = {
         UI.updateSetting('resize');
         UI.updateSetting('quality');
         UI.updateSetting('compression');
+        UI.updateSetting('fast_mode');
+        UI.updateSetting('dynamic_quality');
+        UI.updateFastMode();
         UI.updateSetting('shared');
         UI.updateSetting('view_only');
         UI.updateSetting('ime_clipboard');
@@ -1262,8 +1270,11 @@ const UI = {
         UI.rfb.clipViewport = UI.getSetting('view_clip');
         UI.rfb.scaleViewport = UI.getSetting('resize') === 'scale';
         UI.rfb.resizeSession = UI.getSetting('resize') === 'remote';
+        UI.rfb.fixedDesktopSize = UI.defaultDesktopSize();
         UI.rfb.qualityLevel = parseInt(UI.getSetting('quality'));
         UI.rfb.compressionLevel = parseInt(UI.getSetting('compression'));
+        UI.rfb.fastMode = UI.getSetting('fast_mode');
+        UI.rfb.dynamicQuality = UI.getSetting('dynamic_quality');
         UI.rfb.showDotCursor = UI.getSetting('show_dot');
         UI.updateMacShortcuts();
         UI.updateWheel();
@@ -1598,6 +1609,16 @@ const UI = {
 
         UI.rfb.scaleViewport = UI.getSetting('resize') === 'scale';
         UI.rfb.resizeSession = UI.getSetting('resize') === 'remote';
+        UI.rfb.fixedDesktopSize = UI.defaultDesktopSize();
+    },
+
+    // Desktop size from the "desktop_size" default ("1600x900"), which the
+    // server returns to when remote resizing is turned off
+    defaultDesktopSize() {
+        const match = /^(\d+)x(\d+)$/.exec(
+            UI.customSettings.defaults.desktop_size || '');
+        if (!match) return null;
+        return { w: parseInt(match[1]), h: parseInt(match[2]) };
     },
 
 /* ------^-------
@@ -1690,6 +1711,23 @@ const UI = {
  * ==============
  *    QUALITY
  * ------v------*/
+
+    updateFastMode() {
+        const enabled = UI.getSetting('fast_mode');
+        for (const name of ['quality', 'compression']) {
+            if (enabled || name in UI.customSettings.mandatory) {
+                UI.disableSetting(name);
+            } else {
+                UI.enableSetting(name);
+            }
+        }
+        if (UI.rfb) UI.rfb.fastMode = enabled;
+    },
+
+    updateDynamicQuality() {
+        if (!UI.rfb) return;
+        UI.rfb.dynamicQuality = UI.getSetting('dynamic_quality');
+    },
 
     updateQuality() {
         if (!UI.rfb) return;
@@ -1789,6 +1827,10 @@ const UI = {
                 case 'textarea':
                 case 'select-one':
                 case 'select-multiple':
+                // Sliders are dragged with the mouse; cancelling mousedown
+                // would make them impossible to move while the local input
+                // method keeps the focus on the keyboardinput element.
+                case 'range':
                     return;
             }
         }
@@ -1975,6 +2017,7 @@ const UI = {
         } else {
             UI.lastKeyboardinput = newValue;
         }
+        if (UI.imeInputActive()) UI.imePinCaret();
     },
 
     // With IME input, the keyboard focus stays on the keyboardinput element
@@ -1994,6 +2037,7 @@ const UI = {
             // keyInput() expects typing to happen at the end of the text
             const l = input.value.length;
             input.setSelectionRange(l, l);
+            UI.imePinCaret();
         } else {
             UI.rfb.focus();
         }
@@ -2066,6 +2110,15 @@ const UI = {
         }
     },
 
+    // Keep the caret at the element's own position, so the candidate
+    // window stays where the user clicked instead of drifting with the
+    // hidden text's scroll offset
+    imePinCaret() {
+        const input = document.getElementById('noVNC_keyboardinput');
+        input.scrollTop = 0;
+        input.scrollLeft = input.scrollWidth;
+    },
+
     imeCompositionStart(event) {
         if (UI.imeCommitTimer !== null) {
             UI.keyInput(event);
@@ -2079,6 +2132,7 @@ const UI = {
 
         const input = document.getElementById('noVNC_keyboardinput');
         const preedit = document.getElementById('noVNC_ime_preedit');
+        UI.imePinCaret();
         preedit.textContent = event.data || '';
         preedit.style.left = input.style.left;
         preedit.style.top = input.style.top;

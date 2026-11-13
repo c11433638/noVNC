@@ -9,7 +9,7 @@ VNC_PORT="${VNC_PORT:-5901}"
 NOVNC_PORT="${NOVNC_PORT:-6990}"
 NOVNC_FILES_DIR="${NOVNC_FILES_DIR:-${HOME}/Downloads/noVNC}"
 VNC_PASSWORD_FILE="${VNC_PASSWORD_FILE:-${HOME}/.vnc/passwd}"
-VNC_GEOMETRY="${VNC_GEOMETRY:-1280x720}"
+VNC_GEOMETRY="${VNC_GEOMETRY:-1600x900}"
 VNC_STARTUP="${VNC_STARTUP:-${ROOT_DIR}/vnc-xstartup.sh}"
 VNC_LOG="${STATE_DIR}/vnc.log"
 NOVNC_LOG="${STATE_DIR}/novnc.log"
@@ -25,7 +25,7 @@ usage() {
 Usage: $(basename "$0") {start|stop|restart|status|on|off|web-start|web-stop|web-restart}
 
 Environment variables:
-  VNC_GEOMETRY=1920x1080  TigerVNC desktop geometry
+  VNC_GEOMETRY=1600x900   TigerVNC desktop geometry (default 1600x900)
   VNC_PORT=5901           VNC port
   NOVNC_PORT=6990         noVNC/WebSocket port
   NOVNC_FILES_DIR=~/Downloads/noVNC  Remote file transfer folder
@@ -96,14 +96,19 @@ start_vnc() {
         return 0
     fi
 
-    echo "Starting TigerVNC ${VNC_DISPLAY} (port ${VNC_PORT}, geometry ${VNC_GEOMETRY})..."
+    local geometry_args=()
+    if [[ -n "${VNC_GEOMETRY}" ]]; then
+        geometry_args=(-geometry "${VNC_GEOMETRY}")
+    fi
+
+    echo "Starting TigerVNC ${VNC_DISPLAY} (port ${VNC_PORT}, geometry ${VNC_GEOMETRY:-server default})..."
     if ! tigervncserver "${VNC_DISPLAY}" \
         -rfbport "${VNC_PORT}" \
         -localhost no \
         -SecurityTypes VncAuth \
-        -geometry "${VNC_GEOMETRY}" \
-        -depth 16 \
-        -FrameRate 30 \
+        "${geometry_args[@]}" \
+        -depth 24 \
+        -FrameRate 60 \
         -CompareFB 2 \
         -ZlibLevel 1 \
         -xstartup "${VNC_STARTUP}" >>"${VNC_LOG}" 2>&1; then
