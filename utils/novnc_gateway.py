@@ -4,11 +4,13 @@
 import argparse
 import contextlib
 import fcntl
+import gzip
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -33,6 +35,13 @@ except ImportError:
     from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
 
 API = "/api/files/"
+# Scripts are served below /v/<version>/ and cached by browsers forever. The
+# version follows the newest script, so an edited file gets a new address.
+ASSETS = "/v/"
+ASSET_DIRS = ("app", "core", "vendor")
+IMPORT_MAP = re.compile(rb'(<script type="importmap"[^>]*>).*?(</script>)', re.S)
+# Idle keep-alive connections each hold a process; let them go.
+IDLE_SECONDS = 20
 COOKIE = "novnc_files"
 BROWSER_COOKIE = "novnc_browser"
 CHUNK_SIZE = 16 * 1024 * 1024
@@ -263,8 +272,84 @@ class FileStore:
 
 
 class FileRequestHandler(ProxyRequestHandler):
+    timeout = IDLE_SECONDS
+    own_cache_control = False
+
+    def new_websocket_client(self):
+        # The VNC stream has no idle limit and must never time out on a
+        # slow send.
+        self.connection.settimeout(None)
+        super().new_websocket_client()
+
+    def log_error(self, format, *args):
+        if format.startswith("Request timed out"):
+            return
+        super().log_error(format, *args)
+
+    def asset_version(self):
+        newest = 0
+        for name in ASSET_DIRS:
+            for folder, _, files in os.walk(os.path.join(self.server.web, name)):
+                for file in files:
+                    if file.endswith(".js"):
+                        newest = max(newest, os.stat(os.path.join(folder, file)).st_mtime_ns)
+        return "%x" % newest
+
+    def send_static(self, content, content_type, cache_control):
+        if "gzip" in self.headers.get("Accept-Encoding", ""):
+            content = gzip.compress(content, 6)
+            encoding = "gzip"
+        else:
+            encoding = None
+        self.own_cache_control = True
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("Vary", "Accept-Encoding")
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(content)
+
+    def serve_static(self):
+        """Serve the page and its versioned scripts; False for anything else."""
+        self.own_cache_control = False
+        path = urlsplit(self.path).path
+        web = self.server.web
+        if path == "/vnc.html":
+            try:
+                page = Path(web, "vnc.html").read_bytes()
+            except OSError:
+                return False
+            prefix = "." + ASSETS + self.asset_version() + "/"
+            imports = {"./%s/" % name: prefix + name + "/" for name in ASSET_DIRS}
+            page = IMPORT_MAP.sub(
+                lambda match: match.group(1) + json.dumps({"imports": imports}).encode() +
+                match.group(2), page, count=1)
+            self.send_static(page, "text/html", "no-cache")
+            return True
+        if path.startswith(ASSETS):
+            parts = path[len(ASSETS):].split("/")[1:]
+            if (len(parts) < 2 or parts[0] not in ASSET_DIRS or not parts[-1].endswith(".js") or
+                    any(not part or part.startswith(".") or "\\" in part for part in parts)):
+                self.send_error(404)
+                return True
+            try:
+                content = Path(web, *parts).read_bytes()
+            except OSError:
+                self.send_error(404)
+                return True
+            self.send_static(content, "text/javascript",
+                             "public, max-age=31536000, immutable")
+            return True
+        return False
+
     def end_headers(self):
-        if urlsplit(self.path).path.startswith(API):
+        if self.own_cache_control:
+            SimpleHTTPRequestHandler.end_headers(self)
+        elif urlsplit(self.path).path.startswith(API):
             self.send_header("Cache-Control", "no-store, private")
             self.send_header("X-Content-Type-Options", "nosniff")
             # Skip websockify's additional Cache-Control header for API replies.
@@ -354,6 +439,7 @@ class FileRequestHandler(ProxyRequestHandler):
             raise APIError(400, "invalid_request") from None
 
     def dispatch(self):
+        self.own_cache_control = False
         self.close_connection = True
         self.connection.settimeout(120)
         try:
@@ -512,14 +598,16 @@ class FileRequestHandler(ProxyRequestHandler):
 
     def do_GET(self):
         if urlsplit(self.path).path.startswith(API):
+            self.own_cache_control = False
             self.dispatch()
-        else:
+        elif self.headers.get("Upgrade") or not self.serve_static():
             super().do_GET()
 
     def do_HEAD(self):
         if urlsplit(self.path).path.startswith(API):
+            self.own_cache_control = False
             self.send_error(405)
-        else:
+        elif not self.serve_static():
             super().do_HEAD()
 
     def do_POST(self):
