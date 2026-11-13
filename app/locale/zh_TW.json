@@ -94,6 +94,8 @@
     "Upload complete.": "上傳完成。",
     "Saved with a new name:": "同名檔案已另存為：",
     "Upload cancelled.": "上傳已取消。",
+    "Select the same file again to continue.": "重新選擇同一檔案即可繼續上傳。",
+    "Drop files to upload": "放開滑鼠上傳檔案",
     "Files already uploaded:": "已上傳檔案數：",
     "Enter your VNC password to access files.": "請輸入 VNC 密碼以存取檔案。",
     "Incorrect VNC password.": "VNC 密碼不正確。",

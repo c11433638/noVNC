@@ -132,6 +132,27 @@ class FileAPITests(unittest.TestCase):
         self.assertEqual(result["name"], "测试文件😀 (1).bin")
         self.assertEqual((self.root / name).read_bytes(), content)
 
+    def test_download_ranges_resume(self):
+        content = bytes(range(256)) * 40
+        (self.root / "range.bin").write_bytes(content)
+        fetch = lambda headers=None: self.request(
+            "GET", "download", {"path": "range.bin"}, headers=headers, raw=True)
+        status, headers, data = fetch()
+        self.assertEqual((status, data, headers["Accept-Ranges"]), (200, content, "bytes"))
+        etag = headers["ETag"]
+        status, headers, data = fetch({"Range": "bytes=1000-", "If-Range": etag})
+        self.assertEqual((status, data), (206, content[1000:]))
+        self.assertEqual(headers["Content-Range"], "bytes 1000-%d/%d" % (len(content) - 1, len(content)))
+        self.assertEqual(fetch({"Range": "bytes=10-19"})[2], content[10:20])
+        self.assertEqual(fetch({"Range": "bytes=-5"})[2], content[-5:])
+        self.assertEqual(fetch({"Range": "bytes=5-999999"})[2], content[5:])
+        # A changed file or an unsupported range falls back to the whole file.
+        status, _, data = fetch({"Range": "bytes=1000-", "If-Range": '"stale"'})
+        self.assertEqual((status, data), (200, content))
+        self.assertEqual(fetch({"Range": "bytes=0-1,5-6"})[0], 200)
+        self.assertEqual(fetch({"Range": "bytes=%d-" % len(content)})[0], 416)
+        self.assertEqual(fetch({"Range": "bytes=9-3"})[0], 416)
+
     def test_zero_length_and_subfolders(self):
         (self.root / "subfolder").mkdir()
         upload_id = self.create("empty.txt", b"", "subfolder")

@@ -1162,6 +1162,27 @@ html {
 }
 
 /* File transfers */
+#noVNC_drop_overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    /* Only the window receives the drag events, so they do not flicker */
+    pointer-events: none;
+}
+#noVNC_drop_overlay.noVNC_open {
+    display: flex;
+}
+#noVNC_drop_overlay > div {
+    padding: 24px 40px;
+    border: 3px dashed white;
+    border-radius: 12px;
+    color: white;
+    font-size: 24px;
+}
 #noVNC_files {
     width: 480px;
 }

@@ -35,7 +35,7 @@ except ImportError:
 API = "/api/files/"
 COOKIE = "novnc_files"
 BROWSER_COOKIE = "novnc_browser"
-CHUNK_SIZE = 4 * 1024 * 1024
+CHUNK_SIZE = 16 * 1024 * 1024
 MAX_FILE_SIZE = 10 * 1024 ** 3
 SESSION_SECONDS = 8 * 3600
 REMEMBER_SECONDS = 7 * 24 * 3600
@@ -300,6 +300,35 @@ class FileRequestHandler(ProxyRequestHandler):
             if self.headers.get("X-NoVNC-Transfer") != "1":
                 raise APIError(403, "invalid_origin")
 
+    def byte_range(self, size, etag):
+        """Return the inclusive (start, end) of a single-range request."""
+        full = (0, size - 1)
+        header = self.headers.get("Range")
+        if not header or size == 0:
+            return full
+        # The file changed since the first part was fetched: send all of it.
+        if self.headers.get("If-Range") not in (None, etag):
+            return full
+        unit, _, spec = header.partition("=")
+        first, dash, last = spec.strip().partition("-")
+        if unit.strip() != "bytes" or not dash or "," in spec:
+            return full
+        try:
+            if first == "":
+                start, end = max(0, size - int(last)), size - 1
+                if int(last) <= 0:
+                    raise ValueError()
+            else:
+                start = int(first)
+                end = min(int(last), size - 1) if last else size - 1
+            if not 0 <= start <= end:
+                raise ValueError()
+        except ValueError:
+            raise APIError(416, "invalid_range") from None
+        if start >= size:
+            raise APIError(416, "invalid_range")
+        return start, end
+
     def body_length(self, maximum):
         try:
             length = int(self.headers["Content-Length"])
@@ -416,15 +445,31 @@ class FileRequestHandler(ProxyRequestHandler):
                 info = os.fstat(file.fileno())
                 if not stat.S_ISREG(info.st_mode):
                     raise APIError(403, "invalid_path")
-                self.send_response(200)
+                # A validator lets browsers resume an interrupted download.
+                etag = '"%x-%x"' % (info.st_mtime_ns, info.st_size)
+                start, end = self.byte_range(info.st_size, etag)
+                partial = (start, end) != (0, info.st_size - 1) and info.st_size > 0
+                self.send_response(206 if partial else 200)
                 self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("ETag", etag)
+                if partial:
+                    self.send_header("Content-Range",
+                                     "bytes %d-%d/%d" % (start, end, info.st_size))
                 self.send_header("Content-Disposition",
                                  "attachment; filename=\"download\"; filename*=UTF-8''" +
                                  quote(parts[-1], safe=""))
-                self.send_header("Content-Length", str(info.st_size))
+                remaining = end - start + 1 if info.st_size else 0
+                self.send_header("Content-Length", str(remaining))
                 self.send_header("Connection", "close")
                 self.end_headers()
-                shutil.copyfileobj(file, self.wfile, 256 * 1024)
+                file.seek(start)
+                while remaining:
+                    chunk = file.read(min(remaining, 256 * 1024))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
         elif endpoint == "upload" and self.command == "GET":
             with store.upload(param("id"), owner) as (file, meta, part, manifest):
                 self.reply(200, {"offset": os.fstat(file.fileno()).st_size})

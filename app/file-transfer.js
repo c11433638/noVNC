@@ -18,6 +18,33 @@ const ERRORS = {
     'too_many_uploads': 'Too many uploads. Please try again later.',
 };
 
+// Unfinished uploads, so picking the same file again (also after a page
+// refresh) continues where it stopped instead of starting over.
+const RESUME_KEY = 'noVNC_file_uploads';
+
+function resumeRecords() {
+    try {
+        const records = JSON.parse(localStorage.getItem(RESUME_KEY));
+        return records && typeof records === 'object' ? records : {};
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveResumeRecord(key, id) {
+    const records = resumeRecords();
+    const now = Date.now();
+    // The server discards unfinished uploads after a day
+    for (const [name, record] of Object.entries(records)) {
+        if (now - record.time > 24 * 3600 * 1000) delete records[name];
+    }
+    if (id) records[key] = { id, time: now };
+    else delete records[key];
+    try {
+        localStorage.setItem(RESUME_KEY, JSON.stringify(records));
+    } catch (err) { /* Resuming is optional. */ }
+}
+
 function sizeLabel(bytes) {
     const units = ['B', 'KB', 'MB', 'GB'];
     let unit = 0;
@@ -57,7 +84,7 @@ export default class FileTransfer {
         this._element('input').addEventListener('change', (e) => {
             const files = Array.from(e.target.files);
             e.target.value = '';
-            this._upload(files);
+            this.upload(files);
         });
         this._element('cancel').addEventListener('click', () => {
             this._cancelled = true;
@@ -229,7 +256,8 @@ export default class FileTransfer {
             xhr.open('PUT', this._url('upload', { id, offset }));
             xhr.setRequestHeader('X-NoVNC-Transfer', '1');
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-            xhr.timeout = 120000;
+            // Generous enough for a whole chunk on a slow uplink
+            xhr.timeout = 900000;
             xhr.upload.onprogress = e => progress(e.loaded);
             xhr.onload = () => {
                 try {
@@ -270,12 +298,30 @@ export default class FileTransfer {
         }
     }
 
-    async _upload(files) {
+    get busy() { return this._busy; }
+
+    // Continue an upload of the same file that was interrupted earlier
+    async _resumeUpload(key) {
+        const record = resumeRecords()[key];
+        if (!record) return null;
+        try {
+            const status = await this._request('upload', { id: record.id });
+            return { id: record.id, offset: status.offset };
+        } catch (err) {
+            if (err.code === 'authentication_required') throw err;
+            // Expired, cancelled or owned by an earlier session
+            saveResumeRecord(key, null);
+            return null;
+        }
+    }
+
+    async upload(files) {
         if (!files.length || this._busy) return;
         const total = files.reduce((sum, file) => sum + file.size, 0);
         let completed = 0;
         let count = 0;
         let id = null;
+        let resumeKey = null;
         this._cancelled = false;
         ++this._revision;
         this._setBusy(true);
@@ -285,15 +331,24 @@ export default class FileTransfer {
         let error = false;
         try {
             // Opening the panel is not required to retain a session across refreshes.
-            await this._list(this._path);
+            const listing = await this._list(this._path);
+            this._maxFileSize = listing.maxFileSize;
             for (const file of files) {
                 if (this._cancelled) throw new DOMException('', 'AbortError');
                 if (file.size > this._maxFileSize) throw new TransferError('file_too_large');
                 this._message(_('Uploading:') + ' ' + file.name + ` (${count + 1}/${files.length})`);
-                const upload = await this._request('upload', {},
-                                                   { name: file.name, path: this._path, size: file.size });
-                id = upload.id;
+                resumeKey = [this._path, file.name, file.size, file.lastModified].join('\n');
                 let offset = 0;
+                const resumed = await this._resumeUpload(resumeKey);
+                if (resumed && resumed.offset <= file.size) {
+                    id = resumed.id;
+                    offset = resumed.offset;
+                } else {
+                    const upload = await this._request('upload', {},
+                                                       { name: file.name, path: this._path, size: file.size });
+                    id = upload.id;
+                    saveResumeRecord(resumeKey, id);
+                }
                 const update = (loaded) => {
                     const amount = completed + offset + loaded;
                     const percent = total ? Math.min(100, Math.round(amount / total * 100)) : 0;
@@ -303,7 +358,7 @@ export default class FileTransfer {
                 update(0);
                 while (offset < file.size) {
                     if (this._cancelled) throw new DOMException('', 'AbortError');
-                    const chunk = file.slice(offset, offset + upload.chunkSize);
+                    const chunk = file.slice(offset, offset + listing.chunkSize);
                     const result = await this._uploadChunk(id, chunk, offset, update);
                     offset = result.offset;
                     update(0);
@@ -311,6 +366,7 @@ export default class FileTransfer {
                 if (this._cancelled) throw new DOMException('', 'AbortError');
                 const result = await this._request('complete', { id }, {});
                 if (result.name !== file.name) renamed.push(result.name);
+                saveResumeRecord(resumeKey, null);
                 id = null;
                 completed += file.size;
                 count++;
@@ -321,7 +377,14 @@ export default class FileTransfer {
             message = this._cancelled ? _('Upload cancelled.') : err.message;
             if (count) message += ' ' + _('Files already uploaded:') + ' ' + count;
             error = !this._cancelled;
-            if (id) {
+            const resumable = !this._cancelled && id &&
+                ['unavailable', 'incomplete_upload', 'invalid_offset',
+                 'authentication_required'].includes(err.code);
+            if (resumable) {
+                // Keep the partial file on the server
+                message += ' ' + _('Select the same file again to continue.');
+            } else if (id) {
+                saveResumeRecord(resumeKey, null);
                 try {
                     await this._request('cancel', { id }, {});
                 } catch (err) { /* Interrupted transfers expire automatically. */ }

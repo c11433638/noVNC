@@ -77,7 +77,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261113a');
+            await l10n.setup(LINGUAS, "app/locale/", '20261113b');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -1152,6 +1152,50 @@ const UI = {
         UI.fileTransfer = new FileTransfer(() => UI.reconnectPassword);
         document.getElementById('noVNC_files_button')
             .addEventListener('click', UI.toggleFilesPanel);
+
+        // Files can be dropped anywhere on the page to upload them into
+        // the folder currently shown in the file panel
+        const overlay = document.getElementById('noVNC_drop_overlay');
+        // Always claim file drags, also when they cannot be uploaded, so
+        // the browser never navigates away from the session to open them
+        const hasFiles = e => e.dataTransfer &&
+                              Array.from(e.dataTransfer.types).includes('Files');
+        let depth = 0;
+        const hide = () => {
+            depth = 0;
+            overlay.classList.remove('noVNC_open');
+        };
+        window.addEventListener('dragenter', (e) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            depth++;
+            if (UI.connected) overlay.classList.add('noVNC_open');
+        });
+        window.addEventListener('dragover', (e) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect =
+                UI.connected && !UI.fileTransfer.busy ? 'copy' : 'none';
+        });
+        window.addEventListener('dragleave', (e) => {
+            if (!hasFiles(e)) return;
+            if (--depth <= 0) hide();
+        });
+        window.addEventListener('drop', (e) => {
+            if (!hasFiles(e)) return;
+            e.preventDefault();
+            hide();
+            if (!UI.connected) return;
+            // Folders cannot be read as files
+            const files = Array.from(e.dataTransfer.items)
+                .filter(item => item.kind === 'file' &&
+                                !item.webkitGetAsEntry?.()?.isDirectory)
+                .map(item => item.getAsFile())
+                .filter(file => file !== null);
+            if (!files.length || UI.fileTransfer.busy) return;
+            UI.openFilesPanel(false);
+            UI.fileTransfer.upload(files);
+        });
     },
 
     closeFilesPanel() {
@@ -1164,11 +1208,15 @@ const UI = {
             UI.closeFilesPanel();
             return;
         }
+        UI.openFilesPanel();
+    },
+
+    openFilesPanel(refresh = true) {
         UI.closeAllPanels();
         UI.openControlbar();
         document.getElementById('noVNC_files').classList.add('noVNC_open');
         document.getElementById('noVNC_files_button').classList.add('noVNC_selected');
-        UI.fileTransfer.refresh();
+        if (refresh) UI.fileTransfer.refresh();
     },
 
 /* ------^-------

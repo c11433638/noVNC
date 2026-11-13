@@ -118,6 +118,8 @@
     "Upload complete.": "上传完成。",
     "Saved with a new name:": "同名文件已另存为：",
     "Upload cancelled.": "上传已取消。",
+    "Select the same file again to continue.": "重新选择同一文件即可继续上传。",
+    "Drop files to upload": "松开鼠标上传文件",
     "Files already uploaded:": "已上传文件数：",
     "Enter your VNC password to access files.": "请输入 VNC 密码以访问文件。",
     "Incorrect VNC password.": "VNC 密码不正确。",

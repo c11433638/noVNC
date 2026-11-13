@@ -9,7 +9,7 @@ VNC_PORT="${VNC_PORT:-5901}"
 NOVNC_PORT="${NOVNC_PORT:-6990}"
 NOVNC_FILES_DIR="${NOVNC_FILES_DIR:-${HOME}/Downloads/noVNC}"
 VNC_PASSWORD_FILE="${VNC_PASSWORD_FILE:-${HOME}/.vnc/passwd}"
-VNC_GEOMETRY="${VNC_GEOMETRY:-1600x900}"
+VNC_GEOMETRY="${VNC_GEOMETRY:-1920x1080}"
 VNC_STARTUP="${VNC_STARTUP:-${ROOT_DIR}/vnc-xstartup.sh}"
 VNC_LOG="${STATE_DIR}/vnc.log"
 NOVNC_LOG="${STATE_DIR}/novnc.log"
@@ -25,7 +25,7 @@ usage() {
 Usage: $(basename "$0") {start|stop|restart|status|on|off|web-start|web-stop|web-restart}
 
 Environment variables:
-  VNC_GEOMETRY=1600x900   TigerVNC desktop geometry (default 1600x900)
+  VNC_GEOMETRY=1920x1080  TigerVNC desktop geometry (default 1920x1080)
   VNC_PORT=5901           VNC port
   NOVNC_PORT=6990         noVNC/WebSocket port
   NOVNC_FILES_DIR=~/Downloads/noVNC  Remote file transfer folder
