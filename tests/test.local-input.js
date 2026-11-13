@@ -1,4 +1,6 @@
 import UI from '../app/ui.js';
+import Keyboard from '../core/input/keyboard.js';
+import RFB from '../core/rfb.js';
 import KeyTable from '../core/input/keysym.js';
 import keysyms from '../core/input/keysymdef.js';
 
@@ -72,6 +74,84 @@ describe('Local input method', function () {
     function symbols(text) {
         return [...text].map(ch => keysyms.lookup(ch.codePointAt(0)));
     }
+
+    for (const queuedText of [false, true]) {
+        it(`should fix remote Caps Lock before Mac shortcuts${queuedText ? ' queued behind text' : ''}`, function () {
+            const original = Object.getOwnPropertyDescriptor(window, 'navigator');
+            const send = sinon.stub(RFB.messages, 'keyEvent');
+            const keyboard = new Keyboard(input);
+            Object.defineProperty(window, 'navigator', { value: { platform: 'Mac' } });
+            Object.assign(UI.rfb, {
+                _rfbConnectionState: 'connected',
+                _remoteCapsLock: true,
+                _remoteNumLock: true,
+                _syncLockState: RFB.prototype._syncLockState,
+                sendKey: RFB.prototype.sendKey,
+            });
+            keyboard.macShortcuts = true;
+            keyboard.onkeyevent = UI.keyEvent;
+            keyboard.grab();
+            try {
+                if (queuedText) {
+                    UI.getSetting.withArgs('ime_clipboard').returns(true);
+                    UI.rfb.pasteText.returns(true);
+                    insert('中文');
+                }
+                input.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Meta', code: 'MetaLeft', metaKey: true,
+                }));
+                for (const key of ['a', 'c']) {
+                    input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key, code: `Key${key.toUpperCase()}`, metaKey: true,
+                    }));
+                }
+                input.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: 'Meta', code: 'MetaLeft',
+                }));
+                if (queuedText) {
+                    expect(send).to.not.have.been.called;
+                    expect(UI.rfb._remoteCapsLock).to.equal(true);
+                    clock.tick(UI.textPasteDelay);
+                }
+                expect(send.args.map(args => args.slice(1))).to.deep.equal([
+                    [KeyTable.XK_Caps_Lock, 1], [KeyTable.XK_Caps_Lock, 0],
+                    [KeyTable.XK_Control_L, 1],
+                    [0x61, 1], [0x61, 0], [0x63, 1], [0x63, 0],
+                    [KeyTable.XK_Control_L, 0],
+                ]);
+                // macOS does not report Num Lock; it must stay unknown.
+                expect(UI.rfb._remoteNumLock).to.equal(true);
+            } finally {
+                keyboard.ungrab();
+                send.restore();
+                Object.defineProperty(window, 'navigator', original);
+            }
+        });
+    }
+
+    it('should not change remote locks for generated text or toolbar keys', function () {
+        const send = sinon.stub(RFB.messages, 'keyEvent');
+        Object.assign(UI.rfb, {
+            _rfbConnectionState: 'connected',
+            _remoteCapsLock: true,
+            _remoteNumLock: true,
+            _syncLockState: RFB.prototype._syncLockState,
+            sendKey: RFB.prototype.sendKey,
+        });
+        try {
+            insert('中文');
+            UI.sendKey(KeyTable.XK_Tab, 'Tab');
+            clock.tick(UI.pacedKeyDelay * 2);
+
+            expect(send.args.map(args => args[1])).to.deep.equal([
+                ...symbols('中中'), ...symbols('文文'), KeyTable.XK_Tab, KeyTable.XK_Tab,
+            ]);
+            expect(UI.rfb._remoteCapsLock).to.equal(true);
+            expect(UI.rfb._remoteNumLock).to.equal(true);
+        } finally {
+            send.restore();
+        }
+    });
 
     it('should pace a whole committed phrase and keep Enter after it', function () {
         UI.rfb.pasteText.returns(true);

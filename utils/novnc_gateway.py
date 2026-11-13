@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "websockify"))
 sys.path.insert(0, str(REPO / "utils"))
 from text_input import TextInputUnavailable, X11TextInput
+from websockify.websocket import WebSocketWantReadError
 from websockify.websocketproxy import ProxyRequestHandler, WebSocketProxy
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 try:
@@ -42,6 +43,10 @@ ASSET_DIRS = ("app", "core", "vendor")
 IMPORT_MAP = re.compile(rb'(<script type="importmap"[^>]*>).*?(</script>)', re.S)
 # Idle keep-alive connections each hold a process; let them go.
 IDLE_SECONDS = 20
+# Committed IME text arrives over one standing WebSocket, sparing every
+# phrase a new connection. The page pings it well within this limit.
+INPUT_SOCKET = API + "input-socket"
+INPUT_SOCKET_SECONDS = 90
 COOKIE = "novnc_files"
 BROWSER_COOKIE = "novnc_browser"
 CHUNK_SIZE = 16 * 1024 * 1024
@@ -275,11 +280,89 @@ class FileRequestHandler(ProxyRequestHandler):
     timeout = IDLE_SECONDS
     own_cache_control = False
 
+    def handle_upgrade(self):
+        if urlsplit(self.path).path == INPUT_SOCKET:
+            # Browsers send cookies with cross-site WebSockets, so the
+            # page's origin is checked before the session is trusted.
+            store = self.server.file_store
+            try:
+                if not self.headers.get("Origin"):
+                    raise APIError(403, "invalid_origin")
+                self.check_origin()
+                try:
+                    store.session(self.headers.get("Cookie"))
+                except APIError:
+                    store.session(self.headers.get("Cookie"), browser=True)
+            except APIError as exc:
+                self.own_cache_control = False
+                self.close_connection = True
+                self.send_error(exc.status)
+                return
+        super().handle_upgrade()
+
     def new_websocket_client(self):
+        if urlsplit(self.path).path == INPUT_SOCKET:
+            self.serve_input_socket()
+            return
         # The VNC stream has no idle limit and must never time out on a
         # slow send.
         self.connection.settimeout(None)
         super().new_websocket_client()
+
+    def type_text(self, text):
+        display = getattr(self.server, "text_input_display", None)
+        if not display:
+            raise APIError(501, "text_input_unavailable")
+        if (not isinstance(text, str) or not 0 < len(text) <= 128 or
+                any(0xd800 <= ord(char) <= 0xdfff or
+                    ord(char) < 32 and char not in "\r\n\t" for char in text)):
+            raise APIError(400, "invalid_request")
+        with open(self.server.file_store.state / "text-input.lock", "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise APIError(409, "text_input_busy") from None
+            try:
+                with X11TextInput(display) as input_handler:
+                    input_handler.send(text)
+            except TextInputUnavailable:
+                raise APIError(501, "text_input_unavailable") from None
+            except Exception:
+                # Delivery might be partial. Never tell the client to retry
+                # with another transport and duplicate an entered prefix.
+                raise APIError(500, "text_input_failed") from None
+
+    def serve_input_socket(self):
+        socket = self.request
+        self.connection.settimeout(INPUT_SOCKET_SECONDS)
+        while True:
+            try:
+                message = socket.recvmsg()
+            except WebSocketWantReadError:
+                continue
+            except OSError:
+                return
+            if message is None:
+                return
+            try:
+                data = json.loads(message)
+                if not isinstance(data, dict):
+                    raise ValueError()
+            except (ValueError, UnicodeError):
+                return
+            if data.get("ping"):
+                reply = {"pong": True}
+            else:
+                reply = {"id": data.get("id")}
+                try:
+                    self.type_text(data.get("text"))
+                    reply["typed"] = True
+                except APIError as exc:
+                    reply["error"] = exc.code
+            try:
+                socket.sendmsg(json.dumps(reply).encode())
+            except OSError:
+                return
 
     def log_error(self, format, *args):
         if format.startswith("Request timed out"):
@@ -495,28 +578,7 @@ class FileRequestHandler(ProxyRequestHandler):
         except APIError:
             owner = store.session(self.headers.get("Cookie"), browser=True)
         if endpoint == "input-text" and self.command == "POST":
-            display = getattr(self.server, "text_input_display", None)
-            if not display:
-                raise APIError(501, "text_input_unavailable")
-            text = self.read_json().get("text")
-            if (not isinstance(text, str) or not 0 < len(text) <= 128 or
-                    any(0xd800 <= ord(char) <= 0xdfff or
-                        ord(char) < 32 and char not in "\r\n\t" for char in text)):
-                raise APIError(400, "invalid_request")
-            with open(store.state / "text-input.lock", "a") as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    raise APIError(409, "text_input_busy") from None
-                try:
-                    with X11TextInput(display) as input_handler:
-                        input_handler.send(text)
-                except TextInputUnavailable:
-                    raise APIError(501, "text_input_unavailable") from None
-                except Exception:
-                    # Delivery might be partial. Never tell the client to retry
-                    # with another transport and duplicate an entered prefix.
-                    raise APIError(500, "text_input_failed") from None
+            self.type_text(self.read_json().get("text"))
             self.reply(200, {"typed": True})
         elif endpoint == "list" and self.command == "GET":
             self.reply(200, store.listing(param("path")))

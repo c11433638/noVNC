@@ -1892,7 +1892,7 @@ const UI = {
         UI.lastKeyboardinput = kbi.value;
     },
 
-    keyEvent(keysym, code, down) {
+    keyEvent(keysym, code, down, numlock = null, capslock = null) {
         if (!UI.rfb) return;
 
         // A key pressed immediately after committing must follow that text,
@@ -1902,7 +1902,7 @@ const UI = {
         }
 
         // Paced as well, so keys can't overtake text still being sent
-        UI.sendKeyPaced(keysym, code, down);
+        UI.sendKeyPaced(keysym, code, down, numlock, capslock);
     },
 
     // The server maps characters missing from its keymap to a spare keycode
@@ -1910,8 +1910,9 @@ const UI = {
     // character before the application has looked up the first one. Space
     // those characters out so text committed by an input method in one go
     // arrives intact instead of repeating its last character.
-    sendKeyPaced(keysym, code, down) {
-        UI.pacedKeys.push([keysym, code, down]);
+    sendKeyPaced(keysym, code, down, numlock = null, capslock = null) {
+        // Keep the lock state with the key until earlier text is delivered.
+        UI.pacedKeys.push([keysym, code, down, numlock, capslock]);
         if (UI.pacedKeysTimer === null && UI.pacedTextPending === null) {
             UI.flushPacedKeys();
         }
@@ -1971,8 +1972,8 @@ const UI = {
                 UI.queueTextKeysyms(next);
                 continue;
             }
-            const [keysym, code, down] = next;
-            UI.rfb.sendKey(keysym, code, down);
+            const [keysym, code, down, numlock = null, capslock = null] = next;
+            UI.rfb.sendKey(keysym, code, down, numlock, capslock);
 
             // Latin-1 and function keys are always in the keymap
             const unmapped = (keysym > 0xff && keysym < 0xfe00) ||

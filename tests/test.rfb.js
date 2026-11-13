@@ -448,6 +448,36 @@ describe('Remote Frame Buffer protocol client', function () {
         });
 
         describe('#sendKey', function () {
+            it('should synchronize lock states before sending a key', function () {
+                client._remoteCapsLock = true;
+                client._remoteNumLock = false;
+                const send = sinon.spy(RFB.messages, 'keyEvent');
+                try {
+                    client.sendKey(0x61, 'KeyA', true, true, false);
+                    expect(send.args.map(args => args.slice(1))).to.deep.equal([
+                        [KeyTable.XK_Caps_Lock, 1], [KeyTable.XK_Caps_Lock, 0],
+                        [KeyTable.XK_Num_Lock, 1], [KeyTable.XK_Num_Lock, 0],
+                        [0x61, 1],
+                    ]);
+                } finally {
+                    send.restore();
+                }
+            });
+
+            it('should preserve lock states for a generated press and release', function () {
+                client._remoteCapsLock = true;
+                const send = sinon.spy(RFB.messages, 'keyEvent');
+                try {
+                    client.sendKey(0x61, 'KeyA', undefined, null, false);
+                    expect(send.args.map(args => args.slice(1))).to.deep.equal([
+                        [KeyTable.XK_Caps_Lock, 1], [KeyTable.XK_Caps_Lock, 0],
+                        [0x61, 1], [0x61, 0],
+                    ]);
+                } finally {
+                    send.restore();
+                }
+            });
+
             it('should send a single key with the given code and state (down = true)', function () {
                 let esock = new Websock();
                 let ews = new FakeWebSocket();
@@ -3412,6 +3442,15 @@ describe('Remote Frame Buffer protocol client', function () {
 
                     expect(client.sendKey).to.have.been.calledOnce;
                     expect(client.sendKey.firstCall).to.have.been.calledWith(0x61, "KeyA", true);
+                });
+
+                it('should leave locks unchanged when local states are omitted', function () {
+                    sendLedStateUpdate(0b110);
+                    client._handleKeyEvent(0x61, 'KeyA', true);
+
+                    expect(client.sendKey).to.have.been.calledOnceWithExactly(0x61, 'KeyA', true);
+                    expect(client._remoteCapsLock).to.equal(true);
+                    expect(client._remoteNumLock).to.equal(true);
                 });
 
                 it('should not toggle caps lock if the key is caps lock', function () {

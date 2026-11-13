@@ -513,6 +513,7 @@ The `RFB.sendKey()` method is used to send a key event to the server.
 ```js
 RFB.sendKey(keysym, code);
 RFB.sendKey(keysym, code, down);
+RFB.sendKey(keysym, code, down, numlock, capslock);
 ```
 
 ###### Parameters
@@ -532,6 +533,12 @@ RFB.sendKey(keysym, code, down);
 **`down`** *Optional*
   - A `boolean` specifying if a press or a release event should be
     sent. If omitted then both a press and release event are sent.
+
+**`numlock`**, **`capslock`** *Optional*
+  - The local lock states as `boolean` values. Before a key press, known
+    remote states are synchronized with these values. Omit them or pass
+    `null` when the local state is unknown, such as for generated text or
+    toolbar keys.
 
 #### RFB.toBlob()
 

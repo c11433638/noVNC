@@ -533,13 +533,17 @@ export default class RFB extends EventTargetMixin {
 
     // Send a key press. If 'down' is not specified then send a down key
     // followed by an up key.
-    sendKey(keysym, code, down) {
+    sendKey(keysym, code, down, numlock = null, capslock = null) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
 
         if (down === undefined) {
-            this.sendKey(keysym, code, true);
-            this.sendKey(keysym, code, false);
+            this.sendKey(keysym, code, true, numlock, capslock);
+            this.sendKey(keysym, code, false, numlock, capslock);
             return;
+        }
+
+        if (numlock !== null || capslock !== null) {
+            this._syncLockState(code, down, numlock, capslock);
         }
 
         const scancode = XtScancode[code];
@@ -1118,7 +1122,12 @@ export default class RFB extends EventTargetMixin {
         }
     }
 
-    _handleKeyEvent(keysym, code, down, numlock, capslock) {
+    _handleKeyEvent(keysym, code, down, numlock = null, capslock = null) {
+        this._syncLockState(code, down, numlock, capslock);
+        this.sendKey(keysym, code, down);
+    }
+
+    _syncLockState(code, down, numlock = null, capslock = null) {
         // If remote state of capslock is known, and it doesn't match the local led state of
         // the keyboard, we send a capslock keypress first to bring it into sync.
         // If we just pressed CapsLock, or we toggled it remotely due to it being out of sync
@@ -1147,7 +1156,6 @@ export default class RFB extends EventTargetMixin {
             this.sendKey(KeyTable.XK_Num_Lock, 'NumLock', false);
             this._remoteNumLock = null;
         }
-        this.sendKey(keysym, code, down);
     }
 
     static _convertButtonMask(buttons) {
