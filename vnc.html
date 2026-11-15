@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en" class="noVNC_loading">
 <head>
+    <meta charset="utf-8">
 
     <!--
     noVNC example: simple example using default UI
@@ -19,7 +20,7 @@
     <meta name="theme-color" content="#313131">
 
     <!-- Apple iOS Safari settings -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-visual">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
@@ -41,7 +42,7 @@
     <!-- Locally modified files carry a version, as the HTTPS proxy makes
          browsers cache scripts and styles for hours. Bump it (here and in
          the import map below) whenever these files change. -->
-    <link rel="stylesheet" href="app/styles/base.css?v=20261113c">
+    <link rel="stylesheet" href="app/styles/base.css?v=20261114b">
     <link rel="stylesheet" href="app/styles/input.css">
 
     <!-- Images that will later appear via CSS -->
@@ -298,6 +299,13 @@
                         </label>
                     </li>
                     <li>
+                        <label for="noVNC_setting_touch_mode">Touch input:</label>
+                        <select id="noVNC_setting_touch_mode">
+                            <option value="touchpad">Trackpad</option>
+                            <option value="direct">Direct touch</option>
+                        </select>
+                    </li>
+                    <li>
                         <label>
                             <input id="noVNC_setting_wheel_reverse" type="checkbox"
                                    class="toggle">
@@ -322,11 +330,29 @@
                         </label>
                     </li>
                     <li>
+                        <label for="noVNC_setting_device_mode">Device mode:</label>
+                        <select id="noVNC_setting_device_mode">
+                            <option value="auto">Automatic</option>
+                            <option value="phone">Phone</option>
+                            <option value="desktop">Computer</option>
+                        </select>
+                        <div id="noVNC_device_mode_hint"></div>
+                    </li>
+                    <li>
                         <label for="noVNC_setting_resize">Scaling mode:</label>
                         <select id="noVNC_setting_resize" name="vncResize">
                             <option value="off">None</option>
                             <option value="scale">Local scaling</option>
                             <option value="remote">Remote resizing</option>
+                        </select>
+                    </li>
+                    <li>
+                        <label for="noVNC_setting_remote_scale">Remote desktop size:</label>
+                        <select id="noVNC_setting_remote_scale">
+                            <option value="1">Same as this window</option>
+                            <option value="1.25">1.25× larger</option>
+                            <option value="1.5">1.5× larger</option>
+                            <option value="2">2× larger</option>
                         </select>
                     </li>
                     <li>
@@ -465,6 +491,25 @@
 
     <!-- Status dialog -->
     <div id="noVNC_status"></div>
+
+    <!-- Keys missing from on-screen keyboards, shown above the keyboard -->
+    <div id="noVNC_mobile_keys" translate="no">
+        <button type="button" data-key="esc">Esc</button>
+        <button type="button" data-key="tab">Tab</button>
+        <button type="button" data-key="ctrl">Ctrl</button>
+        <button type="button" data-key="alt">Alt</button>
+        <button type="button" data-key="shift">Shift</button>
+        <button type="button" data-key="left">←</button>
+        <button type="button" data-key="down">↓</button>
+        <button type="button" data-key="up">↑</button>
+        <button type="button" data-key="right">→</button>
+        <button type="button" data-key="home">Home</button>
+        <button type="button" data-key="end">End</button>
+        <button type="button" data-key="pgup">PgUp</button>
+        <button type="button" data-key="pgdn">PgDn</button>
+        <button type="button" data-key="del">Del</button>
+        <button type="button" data-key="hide" aria-label="Hide keyboard">⌨▾</button>
+    </div>
 
     <!-- Shown while files are dragged over the page -->
     <div id="noVNC_drop_overlay"><div>Drop files to upload</div></div>

@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import ssl
 import stat
+import subprocess
 import sys
 import time
 from http.cookies import CookieError, SimpleCookie
@@ -27,6 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "websockify"))
 sys.path.insert(0, str(REPO / "utils"))
 from text_input import TextInputUnavailable, X11TextInput
+import window_fit
 from websockify.websocket import WebSocketWantReadError
 from websockify.websocketproxy import ProxyRequestHandler, WebSocketProxy
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
@@ -332,6 +334,26 @@ class FileRequestHandler(ProxyRequestHandler):
                 # with another transport and duplicate an entered prefix.
                 raise APIError(500, "text_input_failed") from None
 
+    def fit_windows(self, mode):
+        display = getattr(self.server, "text_input_display", None)
+        if not display:
+            raise APIError(501, "window_fit_unavailable")
+        if mode not in ("fit", "restore"):
+            raise APIError(400, "invalid_request")
+        record = self.server.file_store.state / "fitted-windows.json"
+        try:
+            count = window_fit.apply(display, record, mode)
+        except OSError:
+            raise APIError(501, "window_fit_unavailable") from None
+        if mode == "fit":
+            # Follows later size changes by itself; exits at once when
+            # one is already running, and for good after a restore
+            subprocess.Popen(
+                [sys.executable, window_fit.__file__, "watch", display, str(record)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        return count
+
     def serve_input_socket(self):
         socket = self.request
         self.connection.settimeout(INPUT_SOCKET_SECONDS)
@@ -411,7 +433,7 @@ class FileRequestHandler(ProxyRequestHandler):
             page = IMPORT_MAP.sub(
                 lambda match: match.group(1) + json.dumps({"imports": imports}).encode() +
                 match.group(2), page, count=1)
-            self.send_static(page, "text/html", "no-cache")
+            self.send_static(page, "text/html; charset=utf-8", "no-cache")
             return True
         if path.startswith(ASSETS):
             parts = path[len(ASSETS):].split("/")[1:]
@@ -424,7 +446,7 @@ class FileRequestHandler(ProxyRequestHandler):
             except OSError:
                 self.send_error(404)
                 return True
-            self.send_static(content, "text/javascript",
+            self.send_static(content, "text/javascript; charset=utf-8",
                              "public, max-age=31536000, immutable")
             return True
         return False
@@ -577,7 +599,9 @@ class FileRequestHandler(ProxyRequestHandler):
             owner = store.session(self.headers.get("Cookie"))
         except APIError:
             owner = store.session(self.headers.get("Cookie"), browser=True)
-        if endpoint == "input-text" and self.command == "POST":
+        if endpoint == "fit-windows" and self.command == "POST":
+            self.reply(200, {"windows": self.fit_windows(self.read_json().get("mode"))})
+        elif endpoint == "input-text" and self.command == "POST":
             self.type_text(self.read_json().get("text"))
             self.reply(200, {"typed": True})
         elif endpoint == "list" and self.command == "GET":

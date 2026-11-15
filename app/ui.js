@@ -45,6 +45,30 @@ const UI = {
     controlbarMouseDownOffsetY: 0,
 
     lastKeyboardinput: null,
+    lastTouchY: null,
+    smallTouchScreen: false,
+    fullViewport: { w: 0, h: 0 },
+    fitWindowsTimer: null,
+    mobileKeyboardOpen: false,
+    minPhoneDesktopSide: 600,
+    mobileKeys: {
+        esc: [KeyTable.XK_Escape, 'Escape'],
+        tab: [KeyTable.XK_Tab, 'Tab'],
+        left: [KeyTable.XK_Left, 'ArrowLeft'],
+        down: [KeyTable.XK_Down, 'ArrowDown'],
+        up: [KeyTable.XK_Up, 'ArrowUp'],
+        right: [KeyTable.XK_Right, 'ArrowRight'],
+        home: [KeyTable.XK_Home, 'Home'],
+        end: [KeyTable.XK_End, 'End'],
+        pgup: [KeyTable.XK_Page_Up, 'PageUp'],
+        pgdn: [KeyTable.XK_Page_Down, 'PageDown'],
+        del: [KeyTable.XK_Delete, 'Delete'],
+    },
+    mobileStickyKeys: {
+        ctrl: [KeyTable.XK_Control_L, 'ControlLeft'],
+        alt: [KeyTable.XK_Alt_L, 'AltLeft'],
+        shift: [KeyTable.XK_Shift_L, 'ShiftLeft'],
+    },
     defaultKeyboardinputLen: 100,
     imeComposing: false,
     imeCommitTimer: null,
@@ -75,9 +99,19 @@ const UI = {
             UI.customSettings.mandatory = {};
         }
 
+        // A phone cannot show a desktop-sized screen legibly. Unless the
+        // user chose otherwise, let the desktop follow the phone's screen
+        // instead, somewhat enlarged so applications still have room.
+        UI.smallTouchScreen = isTouchDevice &&
+            Math.min(window.screen.width, window.screen.height) <= 600;
+        if (UI.smallTouchScreen) {
+            const defaults = UI.customSettings.defaults;
+            defaults.remote_scale = String(defaults.mobile_remote_scale || '1.5');
+        }
+
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261113e');
+            await l10n.setup(LINGUAS, "app/locale/", '20261114b');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -147,6 +181,7 @@ const UI = {
         UI.addConnectionControlHandlers();
         UI.addClipboardHandlers();
         UI.addFileTransferHandlers();
+        UI.addMobileHandlers();
         UI.addSettingsHandlers();
         document.getElementById("noVNC_status")
             .addEventListener('click', UI.hideStatus);
@@ -204,6 +239,8 @@ const UI = {
         UI.initSetting('autoconnect', false);
         UI.initSetting('view_clip', false);
         UI.initSetting('resize', 'remote');
+        UI.initSetting('remote_scale', '1');
+        UI.initSetting('device_mode', 'auto');
         UI.initSetting('quality', 6);
         UI.initSetting('compression', 2);
         UI.initSetting('fast_mode', false);
@@ -216,6 +253,9 @@ const UI = {
         UI.initSetting('ime_input', !isTouchDevice);
         UI.initSetting('ime_clipboard', false);
         UI.initSetting('mac_shortcuts', isMac() || isIOS());
+        // Fingers are too coarse to point with on a phone or tablet
+        UI.initSetting('touch_mode', isTouchDevice &&
+                       (UI.smallTouchScreen || isIOS() || isAndroid()) ? 'touchpad' : 'direct');
         UI.initSetting('wheel_reverse', false);
         UI.initSetting('wheel_speed', '1');
         UI.initSetting('show_dot', false);
@@ -282,6 +322,119 @@ const UI = {
         const exps = document.getElementsByClassName("noVNC_expander");
         for (let i = 0;i < exps.length;i++) {
             exps[i].addEventListener('click', UI.toggleExpander);
+        }
+    },
+
+    // Phones and tablets: a row of keys the on-screen keyboard lacks, shown
+    // right above it, and a view that stays put while the keyboard is open.
+    addMobileHandlers() {
+        UI.applyDeviceMode();
+        // Before the session notices a resize: the keyboard handling may
+        // keep its size as it is
+        window.addEventListener('resize', () => {
+            UI.updateMobileKeyboard();
+            UI.applyResizeMode();
+            if (UI.phoneDesktop()) UI.fitRemoteWindows();
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && UI.connected) UI.fitRemoteWindows();
+        });
+
+        const bar = document.getElementById('noVNC_mobile_keys');
+        // Tapping a key must not take the focus from the text field,
+        // which would close the on-screen keyboard
+        bar.addEventListener('mousedown', e => e.preventDefault());
+        bar.addEventListener('click', UI.mobileKeyClick);
+
+        // Remember where the user last touched the screen: usually where
+        // they are about to type
+        document.getElementById('noVNC_container')
+            .addEventListener('touchstart', (e) => {
+                if (e.touches.length === 1) UI.lastTouchY = e.touches[0].clientY;
+            }, { capture: true, passive: true });
+
+        const input = document.getElementById('noVNC_keyboardinput');
+        const update = () => setTimeout(UI.updateMobileKeyboard, 0);
+        input.addEventListener('focus', update);
+        input.addEventListener('blur', update);
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', UI.updateMobileKeyboard);
+            window.visualViewport.addEventListener('scroll', UI.updateMobileKeyboard);
+        }
+    },
+
+    // The on-screen keyboard covers the lower part of the page without
+    // resizing it. Leave the session as it is and move the view instead.
+    updateMobileKeyboard() {
+        const bar = document.getElementById('noVNC_mobile_keys');
+        const input = document.getElementById('noVNC_keyboardinput');
+        const container = document.getElementById('noVNC_container');
+        const viewport = window.visualViewport;
+        const focused = document.activeElement === input &&
+                        (isTouchDevice || UI.phoneMode());
+
+        // Some browsers shrink the page for the keyboard, others only the
+        // visible part of it. Remember the height without a keyboard so
+        // both look the same from here on.
+        const full = UI.fullViewport;
+        if (full.w !== window.innerWidth) {
+            full.w = window.innerWidth;
+            full.h = window.innerHeight;
+        } else if (!focused || window.innerHeight > full.h) {
+            full.h = window.innerHeight;
+        }
+
+        let visibleBottom = window.innerHeight;
+        if (viewport && Math.abs(viewport.scale - 1) < 0.01) {
+            visibleBottom = Math.min(visibleBottom,
+                                     viewport.offsetTop + viewport.height);
+        }
+        const covered = Math.max(0, full.h - visibleBottom);
+        const open = focused && UI.connected && covered > 80;
+
+        // Keep the session at its full size while the page is squeezed
+        container.style.height = open && window.innerHeight < full.h ?
+            full.h + 'px' : '';
+
+        bar.classList.toggle('noVNC_open', open);
+        if (open) bar.style.top = (visibleBottom - bar.offsetHeight) + 'px';
+        if (UI.rfb) {
+            UI.rfb.setViewInset(open ? covered + bar.offsetHeight : 0,
+                                open && !UI.mobileKeyboardOpen ? UI.lastTouchY : null);
+        }
+        if (!open && UI.mobileKeyboardOpen) UI.releaseStickyKeys();
+        UI.mobileKeyboardOpen = open;
+    },
+
+    mobileKeyClick(event) {
+        const button = event.target.closest('button');
+        if (!button || !UI.rfb) return;
+        const name = button.dataset.key;
+
+        if (name === 'hide') {
+            UI.hideVirtualKeyboard();
+            return;
+        }
+        if (name in UI.mobileStickyKeys) {
+            // Held until the next key, e.g. Ctrl then C
+            const [keysym, code] = UI.mobileStickyKeys[name];
+            const held = button.classList.toggle('noVNC_selected');
+            UI.sendKeyPaced(keysym, code, held);
+            return;
+        }
+        if (name in UI.mobileKeys) {
+            const [keysym, code] = UI.mobileKeys[name];
+            UI.sendKeyPaced(keysym, code, true);
+            UI.sendKeyPaced(keysym, code, false);
+            UI.releaseStickyKeys();
+        }
+    },
+
+    releaseStickyKeys() {
+        for (const button of document.querySelectorAll('#noVNC_mobile_keys .noVNC_selected')) {
+            button.classList.remove('noVNC_selected');
+            const [keysym, code] = UI.mobileStickyKeys[button.dataset.key];
+            UI.sendKeyPaced(keysym, code, false);
         }
     },
 
@@ -410,6 +563,13 @@ const UI = {
         UI.addSettingChangeHandler('resize');
         UI.addSettingChangeHandler('resize', UI.applyResizeMode);
         UI.addSettingChangeHandler('resize', UI.updateViewClip);
+        UI.addSettingChangeHandler('resize', UI.fitRemoteWindows);
+        UI.addSettingChangeHandler('resize', () => { if (UI.rfb) UI.rfb.resetViewZoom(); });
+        UI.addSettingChangeHandler('device_mode');
+        UI.addSettingChangeHandler('device_mode', UI.applyDeviceMode);
+        UI.addSettingChangeHandler('remote_scale');
+        UI.addSettingChangeHandler('remote_scale', UI.applyResizeMode);
+        UI.addSettingChangeHandler('remote_scale', UI.updateViewClip);
         UI.addSettingChangeHandler('quality');
         UI.addSettingChangeHandler('quality', UI.updateQuality);
         UI.addSettingChangeHandler('compression');
@@ -428,6 +588,8 @@ const UI = {
         UI.addSettingChangeHandler('ime_clipboard');
         UI.addSettingChangeHandler('mac_shortcuts');
         UI.addSettingChangeHandler('mac_shortcuts', UI.updateMacShortcuts);
+        UI.addSettingChangeHandler('touch_mode');
+        UI.addSettingChangeHandler('touch_mode', UI.updateTouchMode);
         UI.addSettingChangeHandler('wheel_reverse');
         UI.addSettingChangeHandler('wheel_reverse', UI.updateWheel);
         UI.addSettingChangeHandler('wheel_speed');
@@ -1017,6 +1179,9 @@ const UI = {
         UI.updateSetting('encrypt');
         UI.updateSetting('view_clip');
         UI.updateSetting('resize');
+        UI.updateSetting('remote_scale');
+        UI.updateSetting('device_mode');
+        UI.updateDeviceModeHint();
         UI.updateSetting('quality');
         UI.updateSetting('compression');
         UI.updateSetting('fast_mode');
@@ -1026,6 +1191,7 @@ const UI = {
         UI.updateSetting('view_only');
         UI.updateSetting('ime_clipboard');
         UI.updateSetting('mac_shortcuts');
+        UI.updateSetting('touch_mode');
         UI.updateSetting('wheel_reverse');
         UI.updateSetting('wheel_speed');
         UI.updateSetting('path');
@@ -1316,9 +1482,7 @@ const UI = {
         UI.rfb.addEventListener("bell", UI.bell);
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
-        UI.rfb.scaleViewport = UI.getSetting('resize') === 'scale';
-        UI.rfb.resizeSession = UI.getSetting('resize') === 'remote';
-        UI.rfb.fixedDesktopSize = UI.defaultDesktopSize();
+        UI.applyDeviceMode();
         UI.rfb.qualityLevel = parseInt(UI.getSetting('quality'));
         UI.rfb.compressionLevel = parseInt(UI.getSetting('compression'));
         UI.rfb.fastMode = UI.getSetting('fast_mode');
@@ -1326,6 +1490,7 @@ const UI = {
         UI.rfb.showDotCursor = UI.getSetting('show_dot');
         UI.updateMacShortcuts();
         UI.updateWheel();
+        UI.updateTouchMode();
 
         UI.updateViewOnly(); // requires UI.rfb
         UI.updateClipboard();
@@ -1377,6 +1542,7 @@ const UI = {
         } else {
             msg = _("Connected (unencrypted) to ") + UI.desktopName;
         }
+        if (UI.phoneMode()) msg += " · " + _("Phone mode");
         UI.showStatus(msg);
         UI.updateVisualState('connected');
 
@@ -1651,13 +1817,86 @@ const UI = {
  *     RESIZE
  * ------v------*/
 
+    // Phone mode: the desktop takes the shape of this screen, windows are
+    // maximized to fit it, and touch gestures zoom and pan the view
+    phoneMode() {
+        const mode = UI.getSetting('device_mode');
+        return mode === 'phone' || (mode !== 'desktop' && UI.smallTouchScreen);
+    },
+
+    resizeMode() {
+        return UI.getSetting('resize');
+    },
+
+    // The desktop takes the shape of the phone's screen
+    phoneDesktop() {
+        return UI.phoneMode() && UI.resizeMode() === 'remote';
+    },
+
+    applyDeviceMode() {
+        const phone = UI.phoneMode();
+        document.documentElement.classList.toggle('noVNC_phone_mode', phone);
+        UI.updateDeviceModeHint();
+        if (!UI.rfb) return;
+
+        UI.applyResizeMode();
+        UI.updateViewClip();
+        UI.rfb.localPinchZoom = phone || isTouchDevice;
+        UI.fitRemoteWindows();
+    },
+
+    updateDeviceModeHint() {
+        const hint = document.getElementById('noVNC_device_mode_hint');
+        if (!hint) return;
+        const map = document.querySelector('script[type="importmap"]');
+        const version = map && /\/v\/([0-9a-f]{8})/.exec(map.textContent);
+        hint.textContent = (UI.phoneMode() ? _("Phone mode is on") : _("Computer mode is on")) +
+                           (version ? " · " + version[1] : "");
+    },
+
+    // Once the desktop has its new size, make the windows fit a phone
+    // sized one, or give them back their own size on a large one
+    fitRemoteWindows() {
+        clearTimeout(UI.fitWindowsTimer);
+        UI.fitWindowsTimer = setTimeout(() => {
+            if (!UI.connected) return;
+            BrowserSession.fitWindows(UI.phoneDesktop() ? 'fit' : 'restore').catch(() => {});
+        }, 1500);
+    },
+
     // Apply remote resizing or local scaling
     applyResizeMode() {
         if (!UI.rfb) return;
 
-        UI.rfb.scaleViewport = UI.getSetting('resize') === 'scale';
-        UI.rfb.resizeSession = UI.getSetting('resize') === 'remote';
+        UI.rfb.resizeTolerance = UI.phoneDesktop() ? 0.1 : 0;
+        UI.rfb.remoteResizeScale = UI.remoteScale();
+        UI.rfb.scaleViewport = UI.viewportScaled();
+        UI.rfb.resizeSession = UI.resizeMode() === 'remote';
         UI.rfb.fixedDesktopSize = UI.defaultDesktopSize();
+    },
+
+    // How much larger than the browser the remote desktop is made
+    remoteScale() {
+        let scale = Number(UI.getSetting('remote_scale'));
+        if (!(scale >= 1 && scale <= 4)) scale = 1;
+        if (UI.phoneDesktop()) {
+            // Applications need some room: many windows cannot get
+            // narrower than about 500 pixels
+            const container = document.getElementById('noVNC_container');
+            const side = Math.min(container.clientWidth, container.clientHeight);
+            if (side > 0) {
+                scale = Math.max(scale, Math.ceil(UI.minPhoneDesktopSide / side * 20) / 20);
+            }
+        }
+        return Math.min(scale, 4);
+    },
+
+    // An enlarged remote desktop is scaled down again to fit
+    viewportScaled() {
+        const mode = UI.resizeMode();
+        // Phone mode always fits the view, which is what pinching zooms
+        return mode === 'scale' || UI.phoneMode() ||
+               (mode === 'remote' && (isTouchDevice || UI.remoteScale() !== 1));
     },
 
     // Desktop size from the "desktop_size" default ("1600x900"), which the
@@ -1681,7 +1920,7 @@ const UI = {
     updateViewClip() {
         if (!UI.rfb) return;
 
-        const scaling = UI.getSetting('resize') === 'scale';
+        const scaling = UI.viewportScaled();
 
         // Some platforms have overlay scrollbars that are difficult
         // to use in our case, which means we have to force panning
@@ -2050,6 +2289,8 @@ const UI = {
             }
         }
 
+        if (inserted.length || oldChars.length > unchanged) UI.releaseStickyKeys();
+
         // Control the text content length in the keyboardinput element
         if (newLen > 2 * UI.defaultKeyboardinputLen) {
             UI.keyboardinputReset();
@@ -2096,6 +2337,11 @@ const UI = {
         const enabled = UI.getSetting('mac_shortcuts');
         if (UI.touchKeyboard) UI.touchKeyboard.macShortcuts = enabled;
         if (UI.rfb) UI.rfb.macShortcuts = enabled;
+    },
+
+    updateTouchMode() {
+        if (!UI.rfb) return;
+        UI.rfb.touchpadMode = UI.getSetting('touch_mode') === 'touchpad';
     },
 
     updateWheel() {

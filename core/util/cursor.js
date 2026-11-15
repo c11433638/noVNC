@@ -131,6 +131,8 @@ export default class Cursor {
             this._position.x = clientX;
             this._position.y = clientY;
         }
+        this._position.x -= this._hotSpot.x;
+        this._position.y -= this._hotSpot.y;
         this._updatePosition();
         let target = document.elementFromPoint(clientX, clientY);
         this._updateVisibility(target);

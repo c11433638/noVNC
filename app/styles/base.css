@@ -1161,6 +1161,50 @@ html {
     display: block;
 }
 
+/* Extra keys above the on-screen keyboard */
+#noVNC_device_mode_hint {
+    margin-top: 4px;
+    font-size: 12px;
+    opacity: 0.75;
+}
+#noVNC_mobile_keys {
+    display: none;
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    z-index: 90;
+    box-sizing: border-box;
+    height: 46px;
+    padding: 5px 6px;
+    gap: 6px;
+    align-items: center;
+    overflow-x: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-x;
+    background: rgba(40, 44, 52, 0.96);
+    scrollbar-width: none;
+}
+#noVNC_mobile_keys.noVNC_open {
+    display: flex;
+}
+#noVNC_mobile_keys button {
+    flex: 0 0 auto;
+    min-width: 44px;
+    height: 36px;
+    margin: 0;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px;
+    background: #555b66;
+    color: white;
+    font-size: 15px;
+    line-height: 36px;
+}
+#noVNC_mobile_keys button.noVNC_selected {
+    background: var(--novnc-blue);
+}
+
 /* File transfers */
 #noVNC_drop_overlay {
     display: none;

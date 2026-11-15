@@ -306,6 +306,14 @@ export default class RFB extends EventTargetMixin {
         this._scaleViewport = false;
         this._resizeSession = false;
         this._fixedDesktopSize = null;
+        this._remoteResizeScale = 1;
+        this._localPinchZoom = false;
+        this._touchpadMode = false;
+        this._padPos = null;            // Trackpad pointer, in framebuffer pixels
+        this._padLast = null;           // Where the finger moving it last was
+        this._resizeTolerance = 0;
+        this._viewZoom = 1;
+        this._viewInsetBottom = 0;
 
         this._showDotCursor = false;
 
@@ -380,6 +388,7 @@ export default class RFB extends EventTargetMixin {
     get scaleViewport() { return this._scaleViewport; }
     set scaleViewport(scale) {
         this._scaleViewport = scale;
+        if (!scale) this._viewZoom = 1;
         // Scaling trumps clipping, so we may need to adjust
         // clipping when enabling or disabling scaling
         if (scale && this._clipViewport) {
@@ -394,6 +403,71 @@ export default class RFB extends EventTargetMixin {
     get resizeSession() { return this._resizeSession; }
     set resizeSession(resize) {
         this._resizeSession = resize;
+        this._requestRemoteResize();
+    }
+
+    // Pinching zooms the local view instead of the remote application,
+    // and a two finger drag pans a zoomed view before it scrolls remotely.
+    // Only applies while the viewport is scaled to fit.
+    get localPinchZoom() { return this._localPinchZoom; }
+    set localPinchZoom(enabled) {
+        this._localPinchZoom = !!enabled;
+        // The view is moved with gestures, so scrollbars only get in the way
+        this._screen.style.scrollbarWidth = this._localPinchZoom ? 'none' : '';
+        if (!this._localPinchZoom) this._setViewZoom(1);
+    }
+
+    // The touch screen works as a trackpad: a finger moves the pointer
+    // from where it is instead of placing it under the finger, and taps
+    // click wherever the pointer is.
+    get touchpadMode() { return this._touchpadMode; }
+    set touchpadMode(enabled) {
+        this._touchpadMode = !!enabled;
+        this._gestures.touchpad = this._touchpadMode;
+        if (this._touchpadMode && this._rfbConnectionState === 'connected') {
+            this._movePadCursor(false);
+        }
+    }
+
+    // With remote resizing, leave the desktop alone while the screen is
+    // within this fraction of its size
+    get resizeTolerance() { return this._resizeTolerance; }
+    set resizeTolerance(fraction) {
+        fraction = Number(fraction);
+        this._resizeTolerance = fraction > 0 && fraction < 1 ? fraction : 0;
+    }
+
+    get viewZoom() { return this._viewZoom; }
+    resetViewZoom() { this._setViewZoom(1); }
+
+    // Keep 'bottom' pixels at the lower edge of the screen free, e.g. for
+    // an on-screen keyboard, without rescaling or resizing the session. The
+    // view scrolls up when 'focusClientY' would otherwise be covered.
+    setViewInset(bottom, focusClientY = null) {
+        bottom = Math.max(0, Math.round(bottom));
+        if (bottom !== this._viewInsetBottom) {
+            this._viewInsetBottom = bottom;
+            this._canvas.style.marginBottom = bottom ? bottom + 'px' : 'auto';
+        }
+        if (bottom && focusClientY !== null) {
+            const rect = this._screen.getBoundingClientRect();
+            const visibleBottom = rect.bottom - bottom;
+            if (focusClientY > visibleBottom - 48) {
+                this._screen.scrollTop += focusClientY -
+                                          (rect.top + (visibleBottom - rect.top) / 2);
+            }
+        }
+    }
+
+    // With remote resizing, ask for a desktop this many times the size of
+    // the container. Combined with scaleViewport it gives a small screen a
+    // larger desktop that is shown scaled down.
+    get remoteResizeScale() { return this._remoteResizeScale; }
+    set remoteResizeScale(scale) {
+        scale = Number(scale);
+        if (!(scale >= 1 && scale <= 4)) scale = 1;
+        if (scale === this._remoteResizeScale) return;
+        this._remoteResizeScale = scale;
         this._requestRemoteResize();
     }
 
@@ -671,7 +745,7 @@ export default class RFB extends EventTargetMixin {
         // Make our elements part of the page
         this._target.appendChild(this._screen);
 
-        this._gestures.attach(this._canvas);
+        this._gestures.attach(this._canvas, this._screen);
 
         this._cursor.attach(this._canvas);
         this._refreshCursor();
@@ -881,8 +955,45 @@ export default class RFB extends EventTargetMixin {
         } else {
             const size = this._screenSize();
             this._display.autoscale(size.w, size.h);
+            if (this._viewZoom !== 1) {
+                this._display.scale = this._display.scale * this._viewZoom;
+            }
         }
         this._fixScrollbars();
+        this._refreshPadCursor();
+    }
+
+    // Zoom the local view, keeping the point under (clientX, clientY) in
+    // place. Without a point the view keeps its top left corner.
+    _setViewZoom(zoom, clientX = null, clientY = null) {
+        // A large desktop fitted to a small screen needs more than the
+        // usual limit to get past its real size
+        const fitted = this._display.scale / this._viewZoom;
+        const limit = Math.max(RFB.maxViewZoom, fitted > 0 ? 1.5 / fitted : 1);
+        zoom = this._scaleViewport ? Math.min(Math.max(zoom, 1), limit) : 1;
+        if (zoom === this._viewZoom) return;
+
+        const before = this._canvas.getBoundingClientRect();
+        this._viewZoom = zoom;
+        this._updateScale();
+        if (clientX === null || !before.width || !before.height) return;
+
+        const after = this._canvas.getBoundingClientRect();
+        const fractionX = (clientX - before.left) / before.width;
+        const fractionY = (clientY - before.top) / before.height;
+        this._screen.scrollLeft += after.left + fractionX * after.width - clientX;
+        this._screen.scrollTop += after.top + fractionY * after.height - clientY;
+    }
+
+    // Scroll the local view, returning how far it actually moved
+    _panView(deltaX, deltaY) {
+        const left = this._screen.scrollLeft;
+        const top = this._screen.scrollTop;
+        this._screen.scrollLeft = left - deltaX;
+        this._screen.scrollTop = top - deltaY;
+        this._refreshPadCursor();
+        return { x: left - this._screen.scrollLeft,
+                 y: top - this._screen.scrollTop };
     }
 
     // Requests a change of remote desktop size. This message is an extension
@@ -913,11 +1024,26 @@ export default class RFB extends EventTargetMixin {
         this._resizeTimeout = null;
 
         // Without remote resizing, put the desktop back to its fixed size
-        const size = this._resizeSession ? this._screenSize()
-                                         : this._fixedDesktopSize;
+        let size = this._fixedDesktopSize;
+        if (this._resizeSession) {
+            const screen = this._screenSize();
+            size = { w: Math.floor(screen.w * this._remoteResizeScale),
+                     h: Math.floor(screen.h * this._remoteResizeScale) };
+        }
+
+        // A phone's browser shows and hides its address bar all the time.
+        // Resizing the desktop for that only disturbs the applications;
+        // scaling takes up the small difference.
+        if (this._resizeSession && this._resizeTolerance > 0 &&
+            this._fbWidth > 0 && this._fbHeight > 0 &&
+            Math.abs(size.w - this._fbWidth) < this._fbWidth * this._resizeTolerance &&
+            Math.abs(size.h - this._fbHeight) < this._fbHeight * this._resizeTolerance) {
+            return;
+        }
 
         // Do we actually change anything?
-        if (size.w === this._fbWidth && size.h === this._fbHeight) {
+        if (Math.floor(size.w) === this._fbWidth &&
+            Math.floor(size.h) === this._fbHeight) {
             return;
         }
 
@@ -1219,6 +1345,12 @@ export default class RFB extends EventTargetMixin {
 
         let bmask = RFB._convertButtonMask(ev.buttons);
 
+        // A real mouse takes the trackpad pointer along
+        if (this._touchpadMode) {
+            this._padPos = { x: this._display.absX(pos.x),
+                             y: this._display.absY(pos.y) };
+        }
+
         let down = ev.type == 'mousedown';
         switch (ev.type) {
             case 'mousedown':
@@ -1433,6 +1565,228 @@ export default class RFB extends EventTargetMixin {
         this._cursor.move(ev.detail.clientX, ev.detail.clientY);
     }
 
+    // Where the trackpad pointer is, in canvas element coordinates
+    _padElementPos() {
+        if (this._padPos === null) {
+            this._padPos = { x: this._fbWidth / 2, y: this._fbHeight / 2 };
+        }
+        const pad = this._padPos;
+        pad.x = Math.min(Math.max(pad.x, 0), Math.max(this._fbWidth - 1, 0));
+        pad.y = Math.min(Math.max(pad.y, 0), Math.max(this._fbHeight - 1, 0));
+        // The middle of the pixel, so it survives being converted back
+        const scale = this._display.scale;
+        return { x: (Math.floor(pad.x) + 0.5 - this._display.absX(0)) * scale,
+                 y: (Math.floor(pad.y) + 0.5 - this._display.absY(0)) * scale };
+    }
+
+    // Draw the cursor at the trackpad pointer. A zoomed view can follow
+    // the pointer so that it never leaves the screen.
+    _movePadCursor(follow) {
+        const pos = this._padElementPos();
+        let bounds = this._canvas.getBoundingClientRect();
+        if (follow) {
+            const view = this._screen.getBoundingClientRect();
+            const margin = Math.min(PAD_FOLLOW_MARGIN, view.width / 4, view.height / 4);
+            const bottom = view.bottom - this._viewInsetBottom;
+            const x = bounds.left + pos.x;
+            const y = bounds.top + pos.y;
+            let deltaX = 0;
+            let deltaY = 0;
+            if (x < view.left + margin) {
+                deltaX = view.left + margin - x;
+            } else if (x > view.right - margin) {
+                deltaX = view.right - margin - x;
+            }
+            if (y < view.top + margin) {
+                deltaY = view.top + margin - y;
+            } else if (y > bottom - margin) {
+                deltaY = bottom - margin - y;
+            }
+            if (deltaX !== 0 || deltaY !== 0) {
+                this._panView(deltaX, deltaY);
+                bounds = this._canvas.getBoundingClientRect();
+            }
+        }
+        this._cursor.move(bounds.left + pos.x, bounds.top + pos.y);
+        return pos;
+    }
+
+    // The view moved below a cursor that is drawn at a fixed position
+    _refreshPadCursor() {
+        if (this._touchpadMode && this._padPos !== null) {
+            this._movePadCursor(false);
+        }
+    }
+
+    // Move the trackpad pointer as far as the finger moved on the screen,
+    // and further when the finger is fast
+    _movePad(deltaX, deltaY) {
+        this._padElementPos();
+        const scale = this._display.scale;
+        if (scale > 0) {
+            const speed = Math.hypot(deltaX, deltaY);
+            const gain = 1 + Math.min(Math.max(speed - PAD_ACCEL_START, 0) /
+                                      PAD_ACCEL_RANGE, 1) * (PAD_ACCEL_MAX - 1);
+            this._padPos.x += deltaX * gain / scale;
+            this._padPos.y += deltaY * gain / scale;
+        }
+        const pos = this._movePadCursor(true);
+        this._handleMouseMove(pos.x, pos.y);
+        return pos;
+    }
+
+    // A pointer that zooming or panning left outside the view comes back
+    // to its nearest edge, rather than the view jumping to the pointer
+    _padIntoView() {
+        const pos = this._padElementPos();
+        const scale = this._display.scale;
+        if (!(scale > 0)) return false;
+        const before = { x: this._padPos.x, y: this._padPos.y };
+        const bounds = this._canvas.getBoundingClientRect();
+        const view = this._screen.getBoundingClientRect();
+        const margin = Math.min(PAD_FOLLOW_MARGIN, view.width / 4, view.height / 4);
+        const bottom = view.bottom - this._viewInsetBottom;
+        const x = bounds.left + pos.x;
+        const y = bounds.top + pos.y;
+        if (x < view.left) {
+            this._padPos.x += (view.left + margin - x) / scale;
+        } else if (x > view.right) {
+            this._padPos.x += (view.right - margin - x) / scale;
+        }
+        if (y < view.top) {
+            this._padPos.y += (view.top + margin - y) / scale;
+        } else if (y > bottom) {
+            this._padPos.y += (bottom - margin - y) / scale;
+        }
+        return this._padPos.x !== before.x || this._padPos.y !== before.y;
+    }
+
+    _padClick(bmask, returned) {
+        const pos = this._movePadCursor(true);
+        // Nobody could see what a pointer that just came back points at
+        if (returned) {
+            this._handleMouseMove(pos.x, pos.y);
+            return;
+        }
+        this._handleMouseButton(pos.x, pos.y, bmask);
+        this._handleMouseButton(pos.x, pos.y, 0x0);
+    }
+
+    _handlePadGesture(ev) {
+        const finger = { x: ev.detail.clientX, y: ev.detail.clientY };
+        let pos;
+
+        let returned = false;
+        if (ev.type === 'gesturestart') {
+            this._focusCanvas();
+            returned = this._padIntoView();
+        }
+
+        switch (ev.type) {
+            case 'gesturestart':
+                switch (ev.detail.type) {
+                    case 'onetap':
+                        this._padClick(0x1, returned);
+                        break;
+                    case 'twotap':
+                        this._padClick(0x4, returned);
+                        break;
+                    case 'threetap':
+                        this._padClick(0x2, returned);
+                        break;
+                    case 'drag':
+                        this._padLast = finger;
+                        break;
+                    case 'longpress':
+                        // Holding still picks things up: the button stays
+                        // down while the finger moves the pointer
+                        this._padLast = finger;
+                        pos = this._movePadCursor(true);
+                        this._handleMouseButton(pos.x, pos.y, 0x1);
+                        if (navigator.vibrate) navigator.vibrate(20);
+                        break;
+                    case 'twodrag':
+                        this._gestureLastMagnitudeX = ev.detail.magnitudeX;
+                        this._gestureLastMagnitudeY = ev.detail.magnitudeY;
+                        break;
+                }
+                break;
+
+            case 'gesturemove':
+                switch (ev.detail.type) {
+                    case 'drag':
+                    case 'longpress':
+                        this._movePad(finger.x - this._padLast.x,
+                                      finger.y - this._padLast.y);
+                        this._padLast = finger;
+                        break;
+                    case 'twodrag':
+                        // Scrolls whatever is below the pointer
+                        pos = this._movePadCursor(false);
+                        this._handleMouseMove(pos.x, pos.y);
+                        this._gestureScroll(ev, pos);
+                        break;
+                }
+                break;
+
+            case 'gestureend':
+                if (ev.detail.type === 'longpress') {
+                    pos = this._movePadCursor(false);
+                    this._handleMouseButton(pos.x, pos.y, 0x0);
+                }
+                break;
+        }
+    }
+
+    _handlePadPinch(ev) {
+        const magnitude = Math.hypot(ev.detail.magnitudeX, ev.detail.magnitudeY);
+        if (ev.type === 'gesturestart') {
+            this._gestureLastMagnitudeX = magnitude;
+        }
+        if (ev.type !== 'gesturemove') return;
+
+        const pos = this._movePadCursor(false);
+        this._handleMouseMove(pos.x, pos.y);
+        if (Math.abs(magnitude - this._gestureLastMagnitudeX) > GESTURE_ZOOMSENS) {
+            this._handleKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
+            while ((magnitude - this._gestureLastMagnitudeX) > GESTURE_ZOOMSENS) {
+                this._handleMouseButton(pos.x, pos.y, 0x8);
+                this._handleMouseButton(pos.x, pos.y, 0x0);
+                this._gestureLastMagnitudeX += GESTURE_ZOOMSENS;
+            }
+            while ((magnitude - this._gestureLastMagnitudeX) < -GESTURE_ZOOMSENS) {
+                this._handleMouseButton(pos.x, pos.y, 0x10);
+                this._handleMouseButton(pos.x, pos.y, 0x0);
+                this._gestureLastMagnitudeX -= GESTURE_ZOOMSENS;
+            }
+            this._handleKeyEvent(KeyTable.XK_Control_L, "ControlLeft", false);
+        }
+    }
+
+    // Turn the distance two fingers have moved into wheel steps
+    _gestureScroll(ev, pos) {
+        while ((ev.detail.magnitudeY - this._gestureLastMagnitudeY) > GESTURE_SCRLSENS) {
+            this._handleMouseButton(pos.x, pos.y, 0x8);
+            this._handleMouseButton(pos.x, pos.y, 0x0);
+            this._gestureLastMagnitudeY += GESTURE_SCRLSENS;
+        }
+        while ((ev.detail.magnitudeY - this._gestureLastMagnitudeY) < -GESTURE_SCRLSENS) {
+            this._handleMouseButton(pos.x, pos.y, 0x10);
+            this._handleMouseButton(pos.x, pos.y, 0x0);
+            this._gestureLastMagnitudeY -= GESTURE_SCRLSENS;
+        }
+        while ((ev.detail.magnitudeX - this._gestureLastMagnitudeX) > GESTURE_SCRLSENS) {
+            this._handleMouseButton(pos.x, pos.y, 0x20);
+            this._handleMouseButton(pos.x, pos.y, 0x0);
+            this._gestureLastMagnitudeX += GESTURE_SCRLSENS;
+        }
+        while ((ev.detail.magnitudeX - this._gestureLastMagnitudeX) < -GESTURE_SCRLSENS) {
+            this._handleMouseButton(pos.x, pos.y, 0x40);
+            this._handleMouseButton(pos.x, pos.y, 0x0);
+            this._gestureLastMagnitudeX -= GESTURE_SCRLSENS;
+        }
+    }
+
     _handleTapEvent(ev, bmask) {
         let pos = clientToElement(ev.detail.clientX, ev.detail.clientY,
                                   this._canvas);
@@ -1466,6 +1820,19 @@ export default class RFB extends EventTargetMixin {
 
     _handleGesture(ev) {
         let magnitude;
+
+        // Pinching is the same either way, unless it zooms the remote
+        // application, which then happens below the pointer
+        if (this._touchpadMode) {
+            if (ev.detail.type !== 'pinch') {
+                this._handlePadGesture(ev);
+                return;
+            }
+            if (!(this._localPinchZoom && this._scaleViewport)) {
+                this._handlePadPinch(ev);
+                return;
+            }
+        }
 
         let pos = clientToElement(ev.detail.clientX, ev.detail.clientY,
                                   this._canvas);
@@ -1506,11 +1873,20 @@ export default class RFB extends EventTargetMixin {
                     case 'twodrag':
                         this._gestureLastMagnitudeX = ev.detail.magnitudeX;
                         this._gestureLastMagnitudeY = ev.detail.magnitudeY;
+                        this._gesturePanX = ev.detail.magnitudeX;
+                        this._gesturePanY = ev.detail.magnitudeY;
                         this._fakeMouseMove(ev, pos.x, pos.y);
                         break;
                     case 'pinch':
                         this._gestureLastMagnitudeX = Math.hypot(ev.detail.magnitudeX,
                                                                  ev.detail.magnitudeY);
+                        if (this._localPinchZoom && this._scaleViewport) {
+                            this._pinchStartMagnitude = this._gestureLastMagnitudeX;
+                            this._pinchStartZoom = this._viewZoom;
+                            this._pinchLastX = ev.detail.clientX;
+                            this._pinchLastY = ev.detail.clientY;
+                            break;
+                        }
                         this._fakeMouseMove(ev, pos.x, pos.y);
                         break;
                 }
@@ -1545,33 +1921,38 @@ export default class RFB extends EventTargetMixin {
                         // We don't know if the mouse was moved so we need to move it
                         // every update.
                         this._fakeMouseMove(ev, pos.x, pos.y);
-                        while ((ev.detail.magnitudeY - this._gestureLastMagnitudeY) > GESTURE_SCRLSENS) {
-                            this._handleMouseButton(pos.x, pos.y, 0x8);
-                            this._handleMouseButton(pos.x, pos.y, 0x0);
-                            this._gestureLastMagnitudeY += GESTURE_SCRLSENS;
+                        if (this._localPinchZoom) {
+                            // Pan the local view first; only what it could
+                            // not absorb scrolls the remote application
+                            const used = this._panView(
+                                ev.detail.magnitudeX - this._gesturePanX,
+                                ev.detail.magnitudeY - this._gesturePanY);
+                            this._gesturePanX = ev.detail.magnitudeX;
+                            this._gesturePanY = ev.detail.magnitudeY;
+                            this._gestureLastMagnitudeX += used.x;
+                            this._gestureLastMagnitudeY += used.y;
                         }
-                        while ((ev.detail.magnitudeY - this._gestureLastMagnitudeY) < -GESTURE_SCRLSENS) {
-                            this._handleMouseButton(pos.x, pos.y, 0x10);
-                            this._handleMouseButton(pos.x, pos.y, 0x0);
-                            this._gestureLastMagnitudeY -= GESTURE_SCRLSENS;
-                        }
-                        while ((ev.detail.magnitudeX - this._gestureLastMagnitudeX) > GESTURE_SCRLSENS) {
-                            this._handleMouseButton(pos.x, pos.y, 0x20);
-                            this._handleMouseButton(pos.x, pos.y, 0x0);
-                            this._gestureLastMagnitudeX += GESTURE_SCRLSENS;
-                        }
-                        while ((ev.detail.magnitudeX - this._gestureLastMagnitudeX) < -GESTURE_SCRLSENS) {
-                            this._handleMouseButton(pos.x, pos.y, 0x40);
-                            this._handleMouseButton(pos.x, pos.y, 0x0);
-                            this._gestureLastMagnitudeX -= GESTURE_SCRLSENS;
-                        }
+                        this._gestureScroll(ev, pos);
                         break;
                     case 'pinch':
+                        magnitude = Math.hypot(ev.detail.magnitudeX, ev.detail.magnitudeY);
+                        if (this._localPinchZoom && this._scaleViewport) {
+                            if (this._pinchStartMagnitude > 0) {
+                                this._setViewZoom(this._pinchStartZoom * magnitude /
+                                                  this._pinchStartMagnitude,
+                                                  ev.detail.clientX, ev.detail.clientY);
+                            }
+                            // The fingers can also move the view while pinching
+                            this._panView(ev.detail.clientX - this._pinchLastX,
+                                          ev.detail.clientY - this._pinchLastY);
+                            this._pinchLastX = ev.detail.clientX;
+                            this._pinchLastY = ev.detail.clientY;
+                            break;
+                        }
                         // Always scroll in the same position.
                         // We don't know if the mouse was moved so we need to move it
                         // every update.
                         this._fakeMouseMove(ev, pos.x, pos.y);
-                        magnitude = Math.hypot(ev.detail.magnitudeX, ev.detail.magnitudeY);
                         if (Math.abs(magnitude - this._gestureLastMagnitudeX) > GESTURE_ZOOMSENS) {
                             this._handleKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
                             while ((magnitude - this._gestureLastMagnitudeX) > GESTURE_ZOOMSENS) {
@@ -1595,8 +1976,11 @@ export default class RFB extends EventTargetMixin {
                     case 'onetap':
                     case 'twotap':
                     case 'threetap':
-                    case 'pinch':
                     case 'twodrag':
+                        break;
+                    case 'pinch':
+                        // Snap back to the fitted view when nearly there
+                        if (this._viewZoom < 1.08) this._setViewZoom(1);
                         break;
                     case 'drag':
                         if (this.dragViewport) {
@@ -3246,6 +3630,15 @@ export default class RFB extends EventTargetMixin {
 // Class Methods
 // JPEG quality used while scrolling or dragging with dynamicQuality, and
 // how long (ms) after the last such input the normal quality returns
+// Trackpad mode: how close the pointer may get to the edge of a zoomed
+// view before the view follows it, and how fast fingers speed it up
+const PAD_FOLLOW_MARGIN = 40;
+const PAD_ACCEL_START = 3;
+const PAD_ACCEL_RANGE = 12;
+const PAD_ACCEL_MAX = 2;
+
+// Largest local zoom reachable by pinching
+RFB.maxViewZoom = 4;
 RFB.motionQualityLevel = 1;
 RFB.motionQualityDelay = 500;
 

@@ -16,6 +16,12 @@ async function request(endpoint, data) {
     return await response.json();
 }
 
+// Maximize the remote windows for a phone-sized desktop ('fit'), or put
+// the ones changed that way back ('restore')
+export async function fitWindows(mode) {
+    return await request('fit-windows', { mode });
+}
+
 export async function remember(password) {
     await request('browser-session', { password });
 }

@@ -21,6 +21,13 @@ const GH_INITSTATE = 127;
 const GH_MOVE_THRESHOLD = 50;
 const GH_ANGLE_THRESHOLD = 90; // Degrees
 
+// As a trackpad, one finger moves the pointer, so it has to react to
+// small movements. The finger gets a moment first, in case a second one
+// is on its way down.
+const GH_PAD_MOVE_THRESHOLD = 6;
+const GH_PAD_MOVE_DELAY = 60;
+const GH_PAD_LONGPRESS_TIMEOUT = 450;
+
 // Timeout when waiting for gestures (ms)
 const GH_MULTITOUCH_TIMEOUT = 250;
 
@@ -36,6 +43,10 @@ const GH_TWOTOUCH_TIMEOUT = 50;
 export default class GestureHandler {
     constructor() {
         this._target = null;
+        this._area = null;
+
+        // Recognize gestures the way a trackpad would
+        this.touchpad = false;
 
         this._state = GH_INITSTATE;
 
@@ -51,18 +62,21 @@ export default class GestureHandler {
         this._boundEventHandler = this._eventHandler.bind(this);
     }
 
-    attach(target) {
+    // Gestures are reported on the target. As a trackpad they can be made
+    // anywhere in the area around it, which defaults to the target itself.
+    attach(target, area) {
         this.detach();
 
         this._target = target;
-        this._target.addEventListener('touchstart',
-                                      this._boundEventHandler);
-        this._target.addEventListener('touchmove',
-                                      this._boundEventHandler);
-        this._target.addEventListener('touchend',
-                                      this._boundEventHandler);
-        this._target.addEventListener('touchcancel',
-                                      this._boundEventHandler);
+        this._area = area || target;
+        this._area.addEventListener('touchstart',
+                                    this._boundEventHandler);
+        this._area.addEventListener('touchmove',
+                                    this._boundEventHandler);
+        this._area.addEventListener('touchend',
+                                    this._boundEventHandler);
+        this._area.addEventListener('touchcancel',
+                                    this._boundEventHandler);
     }
 
     detach() {
@@ -73,19 +87,25 @@ export default class GestureHandler {
         this._stopLongpressTimeout();
         this._stopTwoTouchTimeout();
 
-        this._target.removeEventListener('touchstart',
-                                         this._boundEventHandler);
-        this._target.removeEventListener('touchmove',
-                                         this._boundEventHandler);
-        this._target.removeEventListener('touchend',
-                                         this._boundEventHandler);
-        this._target.removeEventListener('touchcancel',
-                                         this._boundEventHandler);
+        this._area.removeEventListener('touchstart',
+                                       this._boundEventHandler);
+        this._area.removeEventListener('touchmove',
+                                       this._boundEventHandler);
+        this._area.removeEventListener('touchend',
+                                       this._boundEventHandler);
+        this._area.removeEventListener('touchcancel',
+                                       this._boundEventHandler);
         this._target = null;
+        this._area = null;
     }
 
     _eventHandler(e) {
         let fn;
+
+        // Around the target, touches only mean something to a trackpad
+        if (!this.touchpad && !this._target.contains(e.target)) {
+            return;
+        }
 
         e.stopPropagation();
         e.preventDefault();
@@ -187,7 +207,12 @@ export default class GestureHandler {
 
         if (!this._hasDetectedGesture()) {
             // Ignore moves smaller than the minimum threshold
-            if (Math.hypot(deltaX, deltaY) < GH_MOVE_THRESHOLD) {
+            let threshold = GH_MOVE_THRESHOLD;
+            if (this.touchpad && (this._tracked.length === 1) &&
+                ((Date.now() - touch.started) > GH_PAD_MOVE_DELAY)) {
+                threshold = GH_PAD_MOVE_THRESHOLD;
+            }
+            if (Math.hypot(deltaX, deltaY) < threshold) {
                 return;
             }
 
@@ -372,8 +397,8 @@ export default class GestureHandler {
 
     _startLongpressTimeout() {
         this._stopLongpressTimeout();
-        this._longpressTimeoutId = setTimeout(() => this._longpressTimeout(),
-                                              GH_LONGPRESS_TIMEOUT);
+        const timeout = this.touchpad ? GH_PAD_LONGPRESS_TIMEOUT : GH_LONGPRESS_TIMEOUT;
+        this._longpressTimeoutId = setTimeout(() => this._longpressTimeout(), timeout);
     }
 
     _stopLongpressTimeout() {

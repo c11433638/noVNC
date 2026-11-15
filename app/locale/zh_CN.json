@@ -45,6 +45,11 @@
     "Full screen": "全屏",
     "Settings": "设置",
     "Shared mode": "分享模式",
+    "Remote desktop size:": "远程桌面大小：",
+    "Same as this window": "与本窗口相同",
+    "1.25× larger": "放大 1.25 倍",
+    "1.5× larger": "放大 1.5 倍",
+    "2× larger": "放大 2 倍",
     "Turbo mode (low bandwidth)": "极速模式（省流量）",
     "Lower quality while scrolling or dragging": "滚动或拖动时降低画质",
     "Grayscale, lower quality, higher compression. No frame rate limit.": "灰度画面、降低画质、较高压缩，不限制帧数。",
@@ -137,5 +142,15 @@
     "Forget browser login": "忘记浏览器登录",
     "Connected, but browser login could not be remembered.": "已连接，但未能记住浏览器登录。",
     "Browser login forgotten. Enter your password next time.": "已忘记浏览器登录，下次连接时请输入密码。",
-    "Could not forget browser login. Please try again.": "无法忘记浏览器登录，请重试。"
+    "Could not forget browser login. Please try again.": "无法忘记浏览器登录，请重试。",
+    "Device mode:": "设备模式：",
+    "Automatic": "自动",
+    "Phone": "手机",
+    "Computer": "电脑",
+    "Phone mode is on": "当前为手机模式",
+    "Computer mode is on": "当前为电脑模式",
+    "Phone mode": "手机模式",
+    "Touch input:": "触摸方式：",
+    "Trackpad": "触控板",
+    "Direct touch": "直接触摸"
 }
