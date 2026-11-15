@@ -56,7 +56,7 @@ INPUT_SOCKET_SECONDS = 90
 # and some of them are far away. A page that says which attempt this is
 # gets told to try again while the node is slow and attempts remain.
 SLOW_ROUTE_CLOSE = 4008
-ROUTE_ATTEMPTS = 8
+ROUTE_ATTEMPTS = 4
 LINE_ID = re.compile(r"[A-Za-z0-9]{8,32}")
 LINE_SECONDS = 2
 
