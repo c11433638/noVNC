@@ -1603,6 +1603,8 @@ const UI = {
         if (!wasConnected && e.detail.code === SLOW_ROUTE_CLOSE) {
             UI.connect(null, UI.routePassword === undefined ? null : UI.routePassword,
                        UI.routeAttempt + 1);
+            UI.showStatus(_("Looking for a faster line...") + " (" + UI.routeAttempt + ")",
+                          'normal');
             return;
         }
 
@@ -2391,7 +2393,8 @@ const UI = {
                                 (line.resent / line.sent * 100).toFixed(1) + "%";
                     }
                     if (line.attempt > 1) {
-                        text += " · " + _("attempt") + " " + line.attempt;
+                        text += " · " + _("tried") + " " + line.attempt + " " +
+                                (line.slow ? _("nodes, all slow") : _("nodes"));
                     }
                 }
             } catch (err) {

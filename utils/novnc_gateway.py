@@ -56,7 +56,7 @@ INPUT_SOCKET_SECONDS = 90
 # and some of them are far away. A page that says which attempt this is
 # gets told to try again while the node is slow and attempts remain.
 SLOW_ROUTE_CLOSE = 4008
-ROUTE_ATTEMPTS = 4
+ROUTE_ATTEMPTS = 8
 LINE_ID = re.compile(r"[A-Za-z0-9]{8,32}")
 LINE_SECONDS = 2
 
@@ -363,7 +363,9 @@ class FileRequestHandler(ProxyRequestHandler):
             stats = line_stats(self.connection)
             if stats is None:
                 return
-            stats.update(node=self.client_address[0], attempt=attempt)
+            limit = self.server.slow_route_ms
+            stats.update(node=self.client_address[0], attempt=attempt,
+                         slow=bool(limit) and stats["micros"] > limit * 1000)
             if self.client_address[0] in ("127.0.0.1", "::1"):
                 # A tunnel on this machine: its line is not ours to measure.
                 # Cloudflare names the data center the browser reached.

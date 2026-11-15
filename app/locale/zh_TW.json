@@ -131,5 +131,8 @@
     "Direct touch": "直接觸控",
     "Line: ": "線路：",
     "resent": "重傳",
-    "attempt": "連線嘗試"
+    "tried": "已試",
+    "nodes, all slow": "個節點，均較慢",
+    "nodes": "個節點",
+    "Looking for a faster line...": "正在尋找更快的線路..."
 }

@@ -155,5 +155,8 @@
     "Direct touch": "直接触摸",
     "Line: ": "线路：",
     "resent": "重传",
-    "attempt": "连接尝试"
+    "tried": "已试",
+    "nodes, all slow": "个节点，均较慢",
+    "nodes": "个节点",
+    "Looking for a faster line...": "正在寻找更快的线路..."
 }
