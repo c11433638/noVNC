@@ -152,5 +152,8 @@
     "Phone mode": "手机模式",
     "Touch input:": "触摸方式：",
     "Trackpad": "触控板",
-    "Direct touch": "直接触摸"
+    "Direct touch": "直接触摸",
+    "Line: ": "线路：",
+    "resent": "重传",
+    "attempt": "连接尝试"
 }

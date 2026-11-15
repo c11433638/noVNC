@@ -23,6 +23,9 @@ import * as WebUtil from "./webutil.js";
 
 const PAGE_TITLE = "noVNC";
 
+// How our gateway closes a connection that came over a slow line
+const SLOW_ROUTE_CLOSE = 4008;
+
 const LINGUAS = ["cs", "de", "el", "es", "fr", "hr", "hu", "it", "ja", "ko", "nl", "pl", "pt_BR", "ru", "sv", "tr", "uk", "zh_CN", "zh_TW"];
 
 const UI = {
@@ -1401,7 +1404,7 @@ const UI = {
             .classList.remove("noVNC_open");
     },
 
-    connect(event, password) {
+    connect(event, password, routeAttempt) {
 
         // Ignore when rfb already exists
         if (typeof UI.rfb !== 'undefined') {
@@ -1453,6 +1456,18 @@ const UI = {
         }
         UI.sameOriginConnection = url.host === window.location.host &&
             url.pathname === new URL('websockify', window.location.href).pathname;
+
+        // Our gateway turns a connection away while it arrives over a
+        // slow line and there are attempts left, and reports on the line
+        UI.routeAttempt = routeAttempt || 1;
+        UI.routePassword = password;
+        UI.lineId = null;
+        if (UI.sameOriginConnection) {
+            UI.lineId = Array.from(window.crypto.getRandomValues(new Uint8Array(8)),
+                                   b => b.toString(16).padStart(2, '0')).join('');
+            url.searchParams.set('route', UI.routeAttempt);
+            url.searchParams.set('line', UI.lineId);
+        }
 
         if (UI.getSetting('keep_device_awake')) {
             UI.wakeLockManager.acquire();
@@ -1534,6 +1549,7 @@ const UI = {
 
     connectFinished(e) {
         UI.connected = true;
+        UI.updateLine();
         UI.inhibitReconnect = false;
 
         let msg;
@@ -1581,6 +1597,14 @@ const UI = {
         UI.keyboardinputReset();
         UI.hideImePreedit();
         UI.wakeLockManager.release();
+        UI.updateLine();
+
+        // The line was slow: another attempt may get a better one
+        if (!wasConnected && e.detail.code === SLOW_ROUTE_CLOSE) {
+            UI.connect(null, UI.routePassword === undefined ? null : UI.routePassword,
+                       UI.routeAttempt + 1);
+            return;
+        }
 
         if (!e.detail.clean) {
             UI.updateVisualState('disconnected');
@@ -2342,6 +2366,41 @@ const UI = {
     updateTouchMode() {
         if (!UI.rfb) return;
         UI.rfb.touchpadMode = UI.getSetting('touch_mode') === 'touchpad';
+    },
+
+    // Show how the line to the server is doing while the settings are open
+    async updateLine() {
+        clearTimeout(UI.lineTimer);
+        const hint = document.getElementById('noVNC_line_hint');
+        if (!UI.connected || !UI.lineId) {
+            hint.textContent = "";
+            return;
+        }
+        const id = UI.lineId;
+        if (document.getElementById('noVNC_settings').classList.contains('noVNC_open')) {
+            let text = "";
+            try {
+                const response = await fetch(new URL('api/files/line?id=' + id, window.location.href),
+                                             { cache: 'no-store' });
+                if (response.ok) {
+                    const line = await response.json();
+                    text = _("Line: ") + line.node + " · " + line.rtt + " ms";
+                    if (line.sent > 0) {
+                        text += " · " + _("resent") + " " +
+                                (line.resent / line.sent * 100).toFixed(1) + "%";
+                    }
+                    if (line.attempt > 1) {
+                        text += " · " + _("attempt") + " " + line.attempt;
+                    }
+                }
+            } catch (err) {
+                // Leave the hint empty
+            }
+            if (id !== UI.lineId || !UI.connected) return;
+            hint.textContent = text;
+        }
+        clearTimeout(UI.lineTimer);
+        UI.lineTimer = setTimeout(UI.updateLine, 3000);
     },
 
     updateWheel() {

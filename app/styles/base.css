@@ -1162,7 +1162,8 @@ html {
 }
 
 /* Extra keys above the on-screen keyboard */
-#noVNC_device_mode_hint {
+#noVNC_device_mode_hint,
+#noVNC_line_hint {
     margin-top: 4px;
     font-size: 12px;
     opacity: 0.75;

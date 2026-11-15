@@ -14,11 +14,14 @@ import re
 from pathlib import Path
 import secrets
 import shutil
+import socket
 import sqlite3
 import ssl
 import stat
 import subprocess
+import struct
 import sys
+import threading
 import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler
@@ -49,6 +52,27 @@ IDLE_SECONDS = 20
 # phrase a new connection. The page pings it well within this limit.
 INPUT_SOCKET = API + "input-socket"
 INPUT_SOCKET_SECONDS = 90
+# A CDN reaches this server through a different node for every connection,
+# and some of them are far away. A page that says which attempt this is
+# gets told to try again while the node is slow and attempts remain.
+SLOW_ROUTE_CLOSE = 4008
+ROUTE_ATTEMPTS = 4
+LINE_ID = re.compile(r"[A-Za-z0-9]{8,32}")
+LINE_SECONDS = 2
+
+
+def line_stats(connection):
+    """Round trip time and loss of a TCP connection, as the kernel sees them."""
+    try:
+        info = connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 232)
+        rtt, = struct.unpack_from("I", info, 68)
+        resent, = struct.unpack_from("I", info, 100)
+        sent, = struct.unpack_from("I", info, 136)
+        lowest, = struct.unpack_from("I", info, 148)
+    except (OSError, struct.error):
+        return None
+    return {"rtt": round(rtt / 1000), "lowest": round(lowest / 1000),
+            "resent": resent, "sent": sent, "micros": rtt}
 COOKIE = "novnc_files"
 BROWSER_COOKIE = "novnc_browser"
 CHUNK_SIZE = 16 * 1024 * 1024
@@ -306,10 +330,47 @@ class FileRequestHandler(ProxyRequestHandler):
         if urlsplit(self.path).path == INPUT_SOCKET:
             self.serve_input_socket()
             return
+        query = parse_qs(urlsplit(self.path).query)
+        attempt = query.get("route", [""])[0]
+        attempt = int(attempt) if attempt.isdigit() else None
+        stats = line_stats(self.connection)
+        limit = self.server.slow_route_ms
+        if stats:
+            self.log_message("line: %d ms round trip, attempt %s", stats["rtt"], attempt or "-")
+            if limit and attempt and attempt < ROUTE_ATTEMPTS and stats["micros"] > limit * 1000:
+                with contextlib.suppress(Exception):
+                    self.request.close(SLOW_ROUTE_CLOSE, "slow route")
+                return
         # The VNC stream has no idle limit and must never time out on a
         # slow send.
         self.connection.settimeout(None)
-        super().new_websocket_client()
+        line = query.get("line", [""])[0]
+        report = None
+        if stats and LINE_ID.fullmatch(line):
+            report = self.server.file_store.state / "lines" / (line + ".json")
+            threading.Thread(target=self.report_line, args=(report, attempt), daemon=True).start()
+        try:
+            super().new_websocket_client()
+        finally:
+            if report:
+                with contextlib.suppress(OSError):
+                    report.unlink()
+
+    def report_line(self, report, attempt):
+        """Keep a note of how this connection is doing, for the page to show."""
+        report.parent.mkdir(mode=0o700, exist_ok=True)
+        while True:
+            stats = line_stats(self.connection)
+            if stats is None:
+                return
+            stats.update(node=self.client_address[0], attempt=attempt)
+            scratch = report.with_suffix(".tmp")
+            try:
+                scratch.write_text(json.dumps(stats))
+                os.replace(scratch, report)
+            except OSError:
+                return
+            time.sleep(LINE_SECONDS)
 
     def type_text(self, text):
         display = getattr(self.server, "text_input_display", None)
@@ -595,6 +656,15 @@ class FileRequestHandler(ProxyRequestHandler):
         if endpoint == "logout" and self.command == "POST":
             self.reply(200, {}, self.cookie("", 0))
             return
+        if endpoint == "line" and self.command == "GET":
+            # Known only to the page that made the connection
+            if not LINE_ID.fullmatch(param("id")):
+                raise APIError(400, "invalid_request")
+            report = store.state / "lines" / (param("id") + ".json")
+            if time.time() - report.stat().st_mtime > 5 * LINE_SECONDS:
+                raise FileNotFoundError()
+            self.reply(200, json.loads(report.read_text()))
+            return
         try:
             owner = store.session(self.headers.get("Cookie"))
         except APIError:
@@ -725,6 +795,9 @@ def main():
     parser.add_argument("--cert", default=str(REPO / "self.pem"))
     parser.add_argument("--key")
     parser.add_argument("--ssl-only", action="store_true")
+    parser.add_argument("--slow-route-ms", type=float, default=90,
+                        help="Round trip time above which a page is asked to "
+                             "connect again for a nearer CDN node; 0 never asks")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, filename=args.log_file,
                         format="%(asctime)s %(message)s")
@@ -735,6 +808,7 @@ def main():
                             web=args.web, file_only=True, daemon=args.daemon,
                             cert=args.cert, key=args.key, ssl_only=args.ssl_only)
     server.file_store = store
+    server.slow_route_ms = args.slow_route_ms
     server.text_input_display = args.input_display
     if (server.text_input_display is None and
             args.target_host in ("127.0.0.1", "localhost", "::1") and

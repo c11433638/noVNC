@@ -128,5 +128,8 @@
     "Phone mode": "手機模式",
     "Touch input:": "觸控方式：",
     "Trackpad": "觸控板",
-    "Direct touch": "直接觸控"
+    "Direct touch": "直接觸控",
+    "Line: ": "線路：",
+    "resent": "重傳",
+    "attempt": "連線嘗試"
 }

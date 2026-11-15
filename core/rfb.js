@@ -827,6 +827,7 @@ export default class RFB extends EventTargetMixin {
 
     _socketClose(e) {
         Log.Debug("WebSocket on-close event");
+        this._closeCode = e.code;
         let msg = "";
         if (e.code) {
             msg = "(code: " + e.code;
@@ -1172,7 +1173,8 @@ export default class RFB extends EventTargetMixin {
             case 'disconnected':
                 this.dispatchEvent(new CustomEvent(
                     "disconnect", { detail:
-                                    { clean: this._rfbCleanDisconnect } }));
+                                    { clean: this._rfbCleanDisconnect,
+                                      code: this._closeCode } }));
                 break;
         }
     }
