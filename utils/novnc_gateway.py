@@ -364,6 +364,13 @@ class FileRequestHandler(ProxyRequestHandler):
             if stats is None:
                 return
             stats.update(node=self.client_address[0], attempt=attempt)
+            if self.client_address[0] in ("127.0.0.1", "::1"):
+                # A tunnel on this machine: its line is not ours to measure.
+                # Cloudflare names the data center the browser reached.
+                stats = {"attempt": attempt, "node": "127.0.0.1"}
+                place = self.headers.get("CF-Ray", "").rpartition("-")[2]
+                if re.fullmatch(r"[A-Za-z]{3}", place):
+                    stats["node"] = "Cloudflare " + place.upper()
             scratch = report.with_suffix(".tmp")
             try:
                 scratch.write_text(json.dumps(stats))

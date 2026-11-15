@@ -2384,7 +2384,8 @@ const UI = {
                                              { cache: 'no-store' });
                 if (response.ok) {
                     const line = await response.json();
-                    text = _("Line: ") + line.node + " · " + line.rtt + " ms";
+                    text = _("Line: ") + line.node;
+                    if (line.rtt !== undefined) text += " · " + line.rtt + " ms";
                     if (line.sent > 0) {
                         text += " · " + _("resent") + " " +
                                 (line.resent / line.sent * 100).toFixed(1) + "%";
