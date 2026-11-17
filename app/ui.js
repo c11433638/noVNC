@@ -42,6 +42,7 @@ const UI = {
 
     controlbarGrabbed: false,
     controlbarDrag: false,
+    controlbarToggledAt: 0,
     controlbarMouseDownClientX: 0,
     controlbarMouseDownOffsetX: 0,
     controlbarMouseDownClientY: 0,
@@ -309,6 +310,14 @@ const UI = {
             .addEventListener('mousedown', UI.keepControlbar);
         document.getElementById("noVNC_control_bar")
             .addEventListener('keydown', UI.keepControlbar);
+
+        // Opening the bar slides its buttons under the pointer, so a second
+        // click or tap right after the handle would hit a button by mistake
+        for (const type of ['mousedown', 'touchstart', 'click']) {
+            document.getElementById("noVNC_control_bar")
+                .addEventListener(type, UI.swallowControlbarMistap,
+                                  { capture: true, passive: false });
+        }
 
         document.getElementById("noVNC_view_drag_button")
             .addEventListener('click', UI.toggleViewDrag);
@@ -995,6 +1004,7 @@ const UI = {
         // mouseup and mousedown on the same place toggles the controlbar
         if (UI.controlbarGrabbed && !UI.controlbarDrag) {
             UI.toggleControlbar();
+            UI.controlbarToggledAt = Date.now();
             e.preventDefault();
             e.stopPropagation();
             UI.keepControlbar();
@@ -1002,6 +1012,16 @@ const UI = {
         }
         UI.controlbarGrabbed = false;
         UI.showControlbarHint(false);
+    },
+
+    // Ignore presses on the bar's buttons while it is still sliding in or
+    // out after the handle toggled it
+    swallowControlbarMistap(e) {
+        if (Date.now() - UI.controlbarToggledAt > 600) return;
+        if (document.getElementById("noVNC_control_bar_handle")
+            .contains(e.target)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
     },
 
     controlbarHandleMouseDown(e) {
