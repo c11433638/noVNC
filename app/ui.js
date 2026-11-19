@@ -2612,7 +2612,7 @@ const UI = {
         document.getElementById('noVNC_keyboard_button')
             .classList.remove("noVNC_selected");
         if (UI.rfb) {
-            UI.rfb.focusOnClick = !UI.imeInputActive();
+            UI.rfb.focusOnClick = isTouchDevice || !UI.imeInputActive();
         }
     },
 
@@ -2844,8 +2844,11 @@ const UI = {
     focusKeyboard() {
         if (!UI.rfb) return;
 
-        if (UI.imeInputActive()) {
-            const input = document.getElementById('noVNC_keyboardinput');
+        const input = document.getElementById('noVNC_keyboardinput');
+        // The keyboard button opens the touch keyboard. Keep its focus once open.
+        if (isTouchDevice && !UI.rfb.viewOnly && document.activeElement === input) return;
+
+        if (!isTouchDevice && UI.imeInputActive()) {
             input.focus({ preventScroll: true });
             // keyInput() expects typing to happen at the end of the text
             const l = input.value.length;
@@ -2916,7 +2919,7 @@ const UI = {
         const input = document.getElementById('noVNC_keyboardinput');
 
         document.documentElement.classList.toggle('noVNC_ime_input', active);
-        UI.rfb.focusOnClick = !active && document.activeElement !== input;
+        UI.rfb.focusOnClick = (isTouchDevice || !active) && document.activeElement !== input;
         if (!active) {
             UI.hideImePreedit();
         }
@@ -2960,7 +2963,7 @@ const UI = {
         input.style.left = event.clientX + 'px';
         input.style.top = event.clientY + 'px';
 
-        if (document.activeElement !== input) {
+        if (!isTouchDevice && document.activeElement !== input) {
             UI.focusKeyboard();
         }
     },
