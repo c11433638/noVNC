@@ -42,7 +42,7 @@
     <!-- Locally modified files carry a version, as the HTTPS proxy makes
          browsers cache scripts and styles for hours. Bump it (here and in
          the import map below) whenever these files change. -->
-    <link rel="stylesheet" href="app/styles/base.css?v=20261118b">
+    <link rel="stylesheet" href="app/styles/base.css?v=20261119a">
     <link rel="stylesheet" href="app/styles/input.css">
 
     <!-- Images that will later appear via CSS -->
@@ -525,6 +525,9 @@
         <span id="noVNC_clipboard_notice_actions"></span>
         <button type="button" id="noVNC_clipboard_notice_close" aria-label="Close">×</button>
     </div>
+
+    <input type="image" src="app/images/keyboard.svg" alt="Show keyboard"
+           id="noVNC_floating_keyboard" hidden>
 
     <!-- Keys missing from on-screen keyboards, shown above the keyboard -->
     <div id="noVNC_mobile_keys" translate="no">

@@ -3074,6 +3074,31 @@ describe('Remote Frame Buffer protocol client', function () {
                         sinon.spy(client._cursor, 'change');
                     });
 
+                    it('should focus an I-beam position once and clear it on cursor change', function () {
+                        const change = sinon.spy();
+                        client.addEventListener('textcursorchange', change);
+                        const info = { x: 2, y: 4, width: 5, height: 9, encoding: -239 };
+                        const rect = new Uint8Array(info.width * info.height * 4 + info.height);
+                        rect.set([0xf8, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0xf8],
+                                 info.width * info.height * 4);
+                        client._sendMouse(7, 12, 0);
+                        sendFbuMsg([info], [Array.from(rect)], client);
+                        client._sock._websocket._getSentData();
+
+                        expect(client.textCursor).to.equal(true);
+                        expect(change).to.have.been.calledOnce;
+                        expect(client.clickTextCursor()).to.be.an('object');
+                        expect(client.clickTextCursor()).to.be.an('object');
+                        expect(client._sock).to.have.sent(Uint8Array.of(5, 1, 0, 7, 0, 12,
+                                                                        5, 0, 0, 7, 0, 12));
+
+                        rect.fill(0);
+                        sendFbuMsg([info], [Array.from(rect)], client);
+                        expect(client.textCursor).to.equal(false);
+                        expect(change).to.have.been.calledTwice;
+                        expect(client.clickTextCursor()).to.equal(null);
+                    });
+
                     it('should handle a standard cursor', function () {
                         const info = { x: 5, y: 7,
                                        width: 4, height: 4,

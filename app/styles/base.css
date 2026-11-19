@@ -718,7 +718,8 @@ html {
 }
 
 /* noVNC Touch Device only buttons */
-:root:not(.noVNC_connected) #noVNC_keyboard_button {
+:root:not(.noVNC_connected) #noVNC_keyboard_button,
+:root:not(.noVNC_connected) #noVNC_floating_keyboard {
     display: none;
 }
 @media not all and (any-pointer: coarse) {
@@ -1159,6 +1160,22 @@ html {
 }
 #noVNC_ime_preedit.noVNC_open {
     display: block;
+}
+
+#noVNC_floating_keyboard {
+    position: fixed;
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+    z-index: 9;
+    box-sizing: border-box;
+    width: 48px;
+    height: 48px;
+    padding: 10px;
+    border: 1px solid white;
+    border-radius: 50%;
+    background: var(--novnc-blue);
+    box-shadow: 0 2px 8px #0008;
+    touch-action: manipulation;
 }
 
 /* Extra keys above the on-screen keyboard */

@@ -20,7 +20,7 @@ import Inflator from "./inflator.js";
 import Deflator from "./deflator.js";
 import Keyboard from "./input/keyboard.js";
 import GestureHandler from "./input/gesturehandler.js";
-import Cursor from "./util/cursor.js";
+import Cursor, { isTextCursor } from "./util/cursor.js";
 import Websock from "./websock.js";
 import KeyTable from "./input/keysym.js";
 import XtScancode from "./input/xtscancodes.js";
@@ -190,6 +190,7 @@ export default class RFB extends EventTargetMixin {
 
         // Mouse state
         this._mousePos = {};
+        this._remotePointer = null;
         this._mouseButtonMask = 0;
         this._mouseLastMoveTime = 0;
         this._viewportDragging = false;
@@ -249,6 +250,7 @@ export default class RFB extends EventTargetMixin {
         // viewers (TigerVNC, RealVNC, Remmina) display an arrow as the
         // initial cursor instead.
         this._cursorImage = RFB.cursors.none;
+        this._textCursor = false;
 
         // populate decoder array with objects
         this._decoders[encodings.encodingRaw] = new RawDecoder();
@@ -498,6 +500,26 @@ export default class RFB extends EventTargetMixin {
     set showDotCursor(show) {
         this._showDotCursor = show;
         this._refreshCursor();
+    }
+
+    get textCursor() { return this._textCursor && this._remotePointer !== null; }
+
+    // Focus the field under the pointer. If it was already clicked there,
+    // keep the caret or selection the user placed.
+    clickTextCursor() {
+        if (!this.textCursor || this._mouseButtonMask || this._viewOnly ||
+            this._rfbConnectionState !== 'connected') return null;
+
+        const pointer = this._remotePointer;
+        if (!pointer.clicked) {
+            RFB.messages.pointerEvent(this._sock, pointer.x, pointer.y, 1);
+            RFB.messages.pointerEvent(this._sock, pointer.x, pointer.y, 0);
+            pointer.clicked = true;
+        }
+        const bounds = this._canvas.getBoundingClientRect();
+        const scale = this._display.scale;
+        return { x: bounds.left + (pointer.x - this._display.absX(0) + 0.5) * scale,
+                 y: bounds.top + (pointer.y - this._display.absY(0) + 0.5) * scale };
     }
 
     get background() { return this._screen.style.background; }
@@ -1494,14 +1516,21 @@ export default class RFB extends EventTargetMixin {
             throw new Error("Illegal mouse button mask (mask: " + mask + ")");
         }
 
-        let extendedMouseButtons = mask & 0x7f80;
+        const px = this._display.absX(x);
+        const py = this._display.absY(y);
+        const firstPointer = this._remotePointer === null;
+        if (!this._remotePointer || this._remotePointer.x !== px || this._remotePointer.y !== py) {
+            this._remotePointer = { x: px, y: py, clicked: false };
+        }
+        if (mask & 1) this._remotePointer.clicked = true;
 
-        if (this._extendedPointerEventSupported && extendedMouseButtons) {
-            RFB.messages.extendedPointerEvent(this._sock, this._display.absX(x),
-                                              this._display.absY(y), mask);
+        if (this._extendedPointerEventSupported && (mask & 0x7f80)) {
+            RFB.messages.extendedPointerEvent(this._sock, px, py, mask);
         } else {
-            RFB.messages.pointerEvent(this._sock, this._display.absX(x),
-                                      this._display.absY(y), mask);
+            RFB.messages.pointerEvent(this._sock, px, py, mask);
+        }
+        if (firstPointer && this.textCursor) {
+            this.dispatchEvent(new CustomEvent('textcursorchange'));
         }
     }
 
@@ -3643,6 +3672,11 @@ export default class RFB extends EventTargetMixin {
             hotx: hotx, hoty: hoty, w: w, h: h,
         };
         this._refreshCursor();
+        const hadTextCursor = this.textCursor;
+        this._textCursor = isTextCursor(rgba, hotx, hoty, w, h);
+        if (this.textCursor !== hadTextCursor) {
+            this.dispatchEvent(new CustomEvent('textcursorchange'));
+        }
     }
 
     _shouldShowDotCursor() {

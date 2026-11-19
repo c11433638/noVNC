@@ -8,6 +8,51 @@ import { supportsCursorURIs, isTouchDevice } from './browser.js';
 
 const useFallback = !supportsCursorURIs || isTouchDevice;
 
+// VNC sends a cursor bitmap. An I-beam has a centered hotspot and shaft,
+// with wider caps at both ends. Check both text orientations.
+export function isTextCursor(rgba, hotX, hotY, width, height) {
+    const opaque = (x, y) => rgba[(y * width + x) * 4 + 3] >= 128;
+    return isIBeam(width, height, hotX, hotY, opaque) ||
+           isIBeam(height, width, hotY, hotX, (x, y) => opaque(y, x));
+}
+
+function isIBeam(width, height, hotX, hotY, opaque) {
+    let left = width, right = -1, top = height, bottom = -1;
+    const spans = [];
+    for (let y = 0; y < height; y++) {
+        let first = width, last = -1;
+        for (let x = 0; x < width; x++) {
+            if (!opaque(x, y)) continue;
+            first = Math.min(first, x);
+            last = x;
+        }
+        spans.push(Math.max(0, last - first + 1));
+        if (last >= 0) {
+            left = Math.min(left, first);
+            right = Math.max(right, last);
+            top = Math.min(top, y);
+            bottom = y;
+        }
+    }
+
+    const length = bottom - top + 1;
+    const breadth = right - left + 1;
+    if (length < 7 || breadth < 3 || length < breadth * 1.3 ||
+        Math.abs(hotX - (left + right) / 2) > breadth / 4 ||
+        Math.abs(hotY - (top + bottom) / 2) > length / 4 ||
+        !opaque(hotX, hotY)) {
+        return false;
+    }
+
+    const band = Math.floor(length / 5);
+    const firstCap = Math.max(...spans.slice(top, top + band));
+    const lastCap = Math.max(...spans.slice(bottom - band + 1, bottom + 1));
+    const shaft = spans.slice(top + 2 * band, bottom - 2 * band + 1);
+    // Resize arrows are widest slightly inward from each pointed end.
+    return spans[top] >= firstCap * 0.65 && spans[bottom] >= lastCap * 0.65 &&
+           Math.min(...shaft) > 0 && Math.max(...shaft) * 1.4 <= Math.min(firstCap, lastCap);
+}
+
 export default class Cursor {
     constructor() {
         this._target = null;

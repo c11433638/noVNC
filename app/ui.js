@@ -438,7 +438,10 @@ const UI = {
             UI.rfb.setViewInset(open ? covered + bar.offsetHeight : 0,
                                 open && !UI.mobileKeyboardOpen ? UI.lastTouchY : null);
         }
-        if (!open && UI.mobileKeyboardOpen) UI.releaseStickyKeys();
+        if (!open && UI.mobileKeyboardOpen) {
+            UI.releaseStickyKeys();
+            if (focused) UI.hideVirtualKeyboard();
+        }
         UI.mobileKeyboardOpen = open;
     },
 
@@ -477,6 +480,8 @@ const UI = {
     addTouchSpecificHandlers() {
         document.getElementById("noVNC_keyboard_button")
             .addEventListener('click', UI.toggleVirtualKeyboard);
+        document.getElementById('noVNC_floating_keyboard')
+            ?.addEventListener('click', UI.openFloatingKeyboard);
 
         UI.touchKeyboard = new Keyboard(document.getElementById('noVNC_keyboardinput'));
         UI.updateMacShortcuts();
@@ -1913,6 +1918,7 @@ const UI = {
         UI.rfb.addEventListener("clipboard", UI.clipboardReceive);
         UI.rfb.addEventListener("bell", UI.bell);
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
+        UI.rfb.addEventListener('textcursorchange', UI.updateFloatingKeyboard);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
         UI.applyDeviceMode();
         UI.updateFastMode();
@@ -2047,6 +2053,7 @@ const UI = {
         UI.stopConnectionFallback();
 
         UI.rfb = undefined;
+        UI.updateFloatingKeyboard();
         UI.rememberPendingPassword = null;
         UI.sessionRequest = null;
         clearTimeout(UI.pacedKeysTimer);
@@ -2563,6 +2570,28 @@ const UI = {
  *    KEYBOARD
  * ------v------*/
 
+    updateFloatingKeyboard() {
+        const button = document.getElementById('noVNC_floating_keyboard');
+        if (button) {
+            button.hidden = !isTouchDevice || !UI.connected || !UI.rfb?.textCursor ||
+                            UI.rfb.viewOnly || document.activeElement?.id === 'noVNC_keyboardinput';
+        }
+    },
+
+    openFloatingKeyboard(event) {
+        if (event.currentTarget.hidden) return;
+
+        const pointer = UI.rfb?.clickTextCursor();
+        if (!pointer) return;
+
+        const input = document.getElementById('noVNC_keyboardinput');
+        input.style.left = pointer.x + 'px';
+        input.style.top = pointer.y + 'px';
+        UI.lastTouchY = pointer.y;
+        // Safari needs focus directly in this click handler.
+        UI.showVirtualKeyboard();
+    },
+
     showVirtualKeyboard() {
         if (!isTouchDevice) return;
 
@@ -2570,7 +2599,7 @@ const UI = {
 
         if (document.activeElement == input) return;
 
-        input.focus();
+        input.focus({ preventScroll: true });
 
         try {
             const l = input.value.length;
@@ -2606,6 +2635,7 @@ const UI = {
         if (UI.rfb) {
             UI.rfb.focusOnClick = false;
         }
+        UI.updateFloatingKeyboard();
     },
 
     onblurVirtualKeyboard(event) {
@@ -2614,6 +2644,7 @@ const UI = {
         if (UI.rfb) {
             UI.rfb.focusOnClick = isTouchDevice || !UI.imeInputActive();
         }
+        UI.updateFloatingKeyboard();
     },
 
     keepVirtualKeyboard(event) {
@@ -2927,6 +2958,7 @@ const UI = {
         if (UI.connected) {
             UI.focusKeyboard();
         }
+        UI.updateFloatingKeyboard();
     },
 
     // The async clipboard sends the local clipboard when the screen gets
