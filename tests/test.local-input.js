@@ -3,6 +3,7 @@ import Keyboard from '../core/input/keyboard.js';
 import RFB from '../core/rfb.js';
 import KeyTable from '../core/input/keysym.js';
 import keysyms from '../core/input/keysymdef.js';
+import { isTouchDevice } from '../core/util/browser.js';
 
 describe('Local input method', function () {
     let clock;
@@ -40,8 +41,8 @@ describe('Local input method', function () {
         document.body.append(input, preedit, keyboardButton);
         UI.keyboardinputReset();
         sinon.stub(UI, 'getSetting').callThrough();
+        UI.getSetting.withArgs('ime_input').returns(true);
         UI.getSetting.withArgs('ime_clipboard').returns(false);
-        sinon.stub(UI, 'imeInputActive').returns(true);
         sinon.stub(UI, 'idleControlbar');
     });
 
@@ -54,7 +55,6 @@ describe('Local input method', function () {
         UI.pacedKeysTimer = null;
         UI.imeComposing = false;
         UI.imeCommitTimer = null;
-        UI.imeInputActive.restore();
         UI.getSetting.restore();
         UI.idleControlbar.restore();
         input.remove();
@@ -75,6 +75,85 @@ describe('Local input method', function () {
     function symbols(text) {
         return [...text].map(ch => keysyms.lookup(ch.codePointAt(0)));
     }
+
+    describe('keyboard focus', function () {
+        let container;
+        let canvas;
+        let floatingButton;
+        let previousConnected;
+
+        beforeEach(function () {
+            previousConnected = UI.connected;
+            UI.connected = true;
+            container = document.createElement('div');
+            container.id = 'noVNC_container';
+            canvas = document.createElement('canvas');
+            canvas.tabIndex = -1;
+            floatingButton = document.createElement('button');
+            floatingButton.id = 'noVNC_floating_keyboard';
+            document.body.append(container, floatingButton);
+            container.append(canvas);
+            UI.rfb.focus = () => canvas.focus();
+            UI.rfb.textCursor = true;
+            input.addEventListener('focus', UI.onKeyboardInputFocus);
+            input.addEventListener('blur', UI.onKeyboardInputBlur);
+            input.addEventListener('input', UI.keyInput);
+            keyboardButton.addEventListener('click', UI.toggleVirtualKeyboard);
+            UI.addImeInputHandlers();
+        });
+
+        afterEach(function () {
+            UI.connected = previousConnected;
+            document.documentElement.classList.remove('noVNC_ime_input');
+            container.remove();
+            floatingButton.remove();
+        });
+
+        it('should compose from the remote screen with the keyboard button unselected', function () {
+            UI.updateImeInput();
+            expect(document.activeElement).to.equal(input);
+            canvas.focus();
+            canvas.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, pointerType: isTouchDevice ? 'touch' : 'mouse',
+                clientX: 20, clientY: 40,
+            }));
+
+            expect(document.activeElement).to.equal(input);
+            expect(input.inputMode).to.equal(isTouchDevice ? 'none' : '');
+            expect(input.style.left).to.equal('20px');
+            expect(input.style.top).to.equal('40px');
+            expect(UI.rfb.focusOnClick).to.equal(false);
+            expect(keyboardButton.classList.contains('noVNC_selected')).to.equal(false);
+
+            input.dispatchEvent(new CompositionEvent('compositionstart'));
+            input.value += '你';
+            input.dispatchEvent(new CompositionEvent('compositionend', { data: '你' }));
+            input.dispatchEvent(new Event('input'));
+            expect(sentKeysyms()).to.deep.equal(symbols('你'));
+
+            UI.getSetting.withArgs('ime_input').returns(false);
+            UI.updateImeInput();
+            expect(document.activeElement).to.equal(canvas);
+            expect(UI.rfb.focusOnClick).to.equal(true);
+        });
+
+        it('should restore local input when the on-screen keyboard closes', function () {
+            if (!isTouchDevice) this.skip();
+            UI.updateImeInput();
+            expect(floatingButton.hidden).to.equal(false);
+            keyboardButton.click();
+            expect(document.activeElement).to.equal(input);
+            expect(input.inputMode).to.equal('text');
+            expect(keyboardButton.classList.contains('noVNC_selected')).to.equal(true);
+            expect(floatingButton.hidden).to.equal(true);
+
+            keyboardButton.click();
+            expect(document.activeElement).to.equal(input);
+            expect(input.inputMode).to.equal('none');
+            expect(keyboardButton.classList.contains('noVNC_selected')).to.equal(false);
+            expect(floatingButton.hidden).to.equal(false);
+        });
+    });
 
     for (const queuedText of [false, true]) {
         it(`should fix remote Caps Lock before Mac shortcuts${queuedText ? ' queued behind text' : ''}`, function () {

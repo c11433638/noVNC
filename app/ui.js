@@ -406,11 +406,9 @@ const UI = {
     // resizing it. Leave the session as it is and move the view instead.
     updateMobileKeyboard() {
         const bar = document.getElementById('noVNC_mobile_keys');
-        const input = document.getElementById('noVNC_keyboardinput');
         const container = document.getElementById('noVNC_container');
         const viewport = window.visualViewport;
-        const focused = document.activeElement === input &&
-                        (isTouchDevice || UI.phoneMode());
+        const focused = UI.virtualKeyboardActive();
 
         // Some browsers shrink the page for the keyboard, others only the
         // visible part of it. Remember the height without a keyboard so
@@ -493,9 +491,9 @@ const UI = {
         document.getElementById("noVNC_keyboardinput")
             .addEventListener('input', UI.keyInput);
         document.getElementById("noVNC_keyboardinput")
-            .addEventListener('focus', UI.onfocusVirtualKeyboard);
+            .addEventListener('focus', UI.onKeyboardInputFocus);
         document.getElementById("noVNC_keyboardinput")
-            .addEventListener('blur', UI.onblurVirtualKeyboard);
+            .addEventListener('blur', UI.onKeyboardInputBlur);
         document.getElementById("noVNC_keyboardinput")
             .addEventListener('submit', () => false);
 
@@ -531,9 +529,9 @@ const UI = {
         input.addEventListener('compositionend', UI.imeCompositionEnd);
         input.addEventListener('focus', UI.imeInputFocus);
 
-        // Capture phase, as the screen stops mouse events from propagating
+        // Restore IME focus before the screen handles mouse or touch input.
         document.getElementById("noVNC_container")
-            .addEventListener('mousedown', UI.imeScreenMouseDown, true);
+            .addEventListener('pointerdown', UI.imeScreenPointerDown, true);
     },
 
     addExtraKeysHandlers() {
@@ -2654,7 +2652,7 @@ const UI = {
         const button = document.getElementById('noVNC_floating_keyboard');
         if (button) {
             button.hidden = !isTouchDevice || !UI.connected || !UI.rfb?.textCursor ||
-                            UI.rfb.viewOnly || document.activeElement?.id === 'noVNC_keyboardinput';
+                            UI.rfb.viewOnly || UI.virtualKeyboardActive();
         }
     },
 
@@ -2672,13 +2670,20 @@ const UI = {
         UI.showVirtualKeyboard();
     },
 
+    virtualKeyboardActive() {
+        const input = document.getElementById('noVNC_keyboardinput');
+        return document.activeElement === input && input.inputMode === 'text';
+    },
+
     showVirtualKeyboard() {
-        if (!isTouchDevice) return;
+        if (!isTouchDevice || !UI.connected || !UI.rfb || UI.rfb.viewOnly) return;
+        if (UI.virtualKeyboardActive()) return;
 
         const input = document.getElementById('noVNC_keyboardinput');
-
-        if (document.activeElement == input) return;
-
+        // Refocus inside the button's click handler so the browser can open
+        // the on-screen keyboard even if the IME already has focus.
+        input.blur();
+        input.inputMode = 'text';
         input.focus({ preventScroll: true });
 
         try {
@@ -2691,38 +2696,35 @@ const UI = {
     },
 
     hideVirtualKeyboard() {
-        if (!isTouchDevice) return;
+        if (!UI.virtualKeyboardActive()) return;
 
-        const input = document.getElementById('noVNC_keyboardinput');
-
-        if (document.activeElement != input) return;
-
-        input.blur();
+        document.getElementById('noVNC_keyboardinput').blur();
+        UI.focusKeyboard();
     },
 
     toggleVirtualKeyboard() {
-        if (document.getElementById('noVNC_keyboard_button')
-            .classList.contains("noVNC_selected")) {
+        if (UI.virtualKeyboardActive()) {
             UI.hideVirtualKeyboard();
         } else {
             UI.showVirtualKeyboard();
         }
     },
 
-    onfocusVirtualKeyboard(event) {
+    onKeyboardInputFocus(event) {
         document.getElementById('noVNC_keyboard_button')
-            .classList.add("noVNC_selected");
+            .classList.toggle("noVNC_selected", event.target.inputMode === 'text');
         if (UI.rfb) {
             UI.rfb.focusOnClick = false;
         }
         UI.updateFloatingKeyboard();
     },
 
-    onblurVirtualKeyboard(event) {
+    onKeyboardInputBlur(event) {
+        event.target.inputMode = '';
         document.getElementById('noVNC_keyboard_button')
             .classList.remove("noVNC_selected");
         if (UI.rfb) {
-            UI.rfb.focusOnClick = isTouchDevice || !UI.imeInputActive();
+            UI.rfb.focusOnClick = true;
         }
         UI.updateFloatingKeyboard();
     },
@@ -2932,12 +2934,12 @@ const UI = {
             // There always have to be some text in the keyboardinput
             // element with which backspace can interact.
             UI.keyboardinputReset();
-            // This sometimes causes the keyboard to disappear for a second
-            // but it is required for the android keyboard to recognize that
-            // text has been added to the field
-            event.target.blur();
-            // This has to be ran outside of the input handler in order to work
-            setTimeout(event.target.focus.bind(event.target), 0);
+            if (UI.virtualKeyboardActive()) {
+                // The Android keyboard needs a new focus event to recognize
+                // text added to the field. Refocus outside the input handler.
+                event.target.blur();
+                setTimeout(UI.showVirtualKeyboard, 0);
+            }
         } else {
             UI.lastKeyboardinput = newValue;
         }
@@ -2955,11 +2957,14 @@ const UI = {
     focusKeyboard() {
         if (!UI.rfb) return;
 
-        const input = document.getElementById('noVNC_keyboardinput');
-        // The keyboard button opens the touch keyboard. Keep its focus once open.
-        if (isTouchDevice && !UI.rfb.viewOnly && document.activeElement === input) return;
+        if (!UI.rfb.viewOnly && UI.virtualKeyboardActive()) return;
 
-        if (!isTouchDevice && UI.imeInputActive()) {
+        if (UI.imeInputActive()) {
+            const input = document.getElementById('noVNC_keyboardinput');
+            // Let the browser compose hardware keyboard input while keeping
+            // the on-screen keyboard closed until the user opens it.
+            input.inputMode = isTouchDevice ? 'none' : '';
+            if (document.activeElement === input) return;
             input.focus({ preventScroll: true });
             // keyInput() expects typing to happen at the end of the text
             const l = input.value.length;
@@ -3030,7 +3035,7 @@ const UI = {
         const input = document.getElementById('noVNC_keyboardinput');
 
         document.documentElement.classList.toggle('noVNC_ime_input', active);
-        UI.rfb.focusOnClick = (isTouchDevice || !active) && document.activeElement !== input;
+        UI.rfb.focusOnClick = document.activeElement !== input;
         if (!active) {
             UI.hideImePreedit();
         }
@@ -3066,7 +3071,7 @@ const UI = {
         }
     },
 
-    imeScreenMouseDown(event) {
+    imeScreenPointerDown(event) {
         if (!UI.imeInputActive()) return;
 
         // Keep the input method's candidate window next to where the
@@ -3075,7 +3080,7 @@ const UI = {
         input.style.left = event.clientX + 'px';
         input.style.top = event.clientY + 'px';
 
-        if (!isTouchDevice && document.activeElement !== input) {
+        if (document.activeElement !== input) {
             UI.focusKeyboard();
         }
     },
@@ -3210,18 +3215,8 @@ const UI = {
     sendKey(keysym, code, down) {
         UI.sendKeyPaced(keysym, code, down);
 
-        // Move focus to the screen in order to be able to use the
-        // keyboard right after these extra keys.
-        // The exception is when a virtual keyboard is used, because
-        // if we focus the screen the virtual keyboard would be closed.
-        // In this case we focus our special virtual keyboard input
-        // element instead.
-        if (document.getElementById('noVNC_keyboard_button')
-            .classList.contains("noVNC_selected")) {
-            document.getElementById('noVNC_keyboardinput').focus();
-        } else {
-            UI.focusKeyboard();
-        }
+        // Restore keyboard focus after using an extra key.
+        UI.focusKeyboard();
         // fade out the controlbar to highlight that
         // the focus has been moved to the screen
         UI.idleControlbar();
