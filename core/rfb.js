@@ -137,6 +137,7 @@ export default class RFB extends EventTargetMixin {
 
         this._fbWidth = 0;
         this._fbHeight = 0;
+        this._firstFrame = 'waiting';
 
         this._fbName = "";
 
@@ -271,7 +272,7 @@ export default class RFB extends EventTargetMixin {
         }
 
         this._asyncClipboard = new AsyncClipboard(this._canvas);
-        this._asyncClipboard.onpaste = this.clipboardPasteFrom.bind(this);
+        this._asyncClipboard.onpaste = this.syncClipboardText.bind(this);
 
         this._keyboard = new Keyboard(this._canvas);
         this._keyboard.onkeyevent = this._handleKeyEvent.bind(this);
@@ -306,6 +307,7 @@ export default class RFB extends EventTargetMixin {
         this._scaleViewport = false;
         this._resizeSession = false;
         this._fixedDesktopSize = null;
+        this._maxRemoteSize = null;
         this._remoteResizeScale = 1;
         this._localPinchZoom = false;
         this._touchpadMode = false;
@@ -480,6 +482,15 @@ export default class RFB extends EventTargetMixin {
         } else {
             this._fixedDesktopSize = null;
         }
+        this._requestRemoteResize();
+    }
+
+    setDesktopResize({ remote, scale, tolerance, fixedSize, maximum }) {
+        this._resizeSession = remote;
+        this._remoteResizeScale = scale;
+        this._resizeTolerance = tolerance;
+        this._fixedDesktopSize = fixedSize;
+        this._maxRemoteSize = maximum;
         this._requestRemoteResize();
     }
 
@@ -670,9 +681,31 @@ export default class RFB extends EventTargetMixin {
         return true;
     }
 
+    // Runs before the local clipboard is read as text on focus. Resolving
+    // true leaves the remote clipboard to the handler.
+    set beforeClipboardSync(handler) {
+        this._asyncClipboard.onbeforepaste = handler;
+    }
+
+    preserveClipboardOnFocus() {
+        // Leave the remote file selection in place while browser focus moves
+        // between the toolbar and the desktop.
+        this._clipboardSyncBaseline = null;
+    }
+
+    syncClipboardText(text) {
+        // A local clipboard holding only an image or files reads as empty
+        // text. That must not replace what the remote desktop has copied.
+        if (!text) return;
+        if (this._clipboardSyncBaseline === null) this._clipboardSyncBaseline = text;
+        if (text === this._clipboardSyncBaseline) return;
+        this.clipboardPasteFrom(text);
+    }
+
     clipboardPasteFrom(text) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
 
+        this._clipboardSyncBaseline = undefined;
         if (this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] &&
             this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
 
@@ -1028,8 +1061,13 @@ export default class RFB extends EventTargetMixin {
         let size = this._fixedDesktopSize;
         if (this._resizeSession) {
             const screen = this._screenSize();
-            size = { w: Math.floor(screen.w * this._remoteResizeScale),
-                     h: Math.floor(screen.h * this._remoteResizeScale) };
+            let scale = this._remoteResizeScale;
+            if (this._maxRemoteSize) {
+                const { w, h } = this._maxRemoteSize;
+                scale = Math.min(scale, w / Math.max(screen.w, screen.h),
+                                 h / Math.min(screen.w, screen.h));
+            }
+            size = { w: Math.floor(screen.w * scale), h: Math.floor(screen.h * scale) };
         }
 
         // A phone's browser shows and hides its address bar all the time.
@@ -2791,10 +2829,9 @@ export default class RFB extends EventTargetMixin {
 
         // Psuedo-encoding settings
         encs.push(encodings.pseudoEncodingQualityLevel0 +
-                  (this._fastMode ? 0 :
-                   this._motionActive ? Math.min(this._qualityLevel,
-                                                 RFB.motionQualityLevel) :
-                   this._qualityLevel));
+                  (this._fastMode ? 0 : this._motionActive ?
+                      Math.min(this._qualityLevel, RFB.motionQualityLevel) :
+                      this._qualityLevel));
         encs.push(encodings.pseudoEncodingCompressLevel0 +
                   (this._fastMode ? 6 : this._compressionLevel));
         if (this._fastMode) {
@@ -2877,7 +2914,16 @@ export default class RFB extends EventTargetMixin {
 
     _writeClipboard(text) {
         if (this._viewOnly) return;
-        this._asyncClipboard.writeClipboard(text);
+        if (text) this._clipboardSyncBaseline = undefined;
+        // The application may delay the local write, or resolve false to skip it
+        const held = this.clipboardWriteHold?.(text);
+        if (held) {
+            held.then((allowed) => {
+                if (allowed) this._asyncClipboard.writeClipboard(text);
+            });
+        } else {
+            this._asyncClipboard.writeClipboard(text);
+        }
         // Update the manual panel even when automatic clipboard sync succeeds.
         this.dispatchEvent(
             new CustomEvent("clipboard", {detail: {text: text}})
@@ -3216,6 +3262,14 @@ export default class RFB extends EventTargetMixin {
         }
 
         this._display.flip();
+        if (this._firstFrame === 'pending') {
+            this._firstFrame = 'drawn';
+            this._display.flush().then(() => {
+                if (this._rfbConnectionState === 'connected') {
+                    this.dispatchEvent(new CustomEvent('firstframe'));
+                }
+            });
+        }
 
         return true;  // We finished this FBU
     }
@@ -3539,10 +3593,14 @@ export default class RFB extends EventTargetMixin {
         }
 
         try {
-            return decoder.decodeRect(this._FBU.x, this._FBU.y,
-                                      this._FBU.width, this._FBU.height,
-                                      this._sock, this._display,
-                                      this._fbDepth);
+            const decoded = decoder.decodeRect(this._FBU.x, this._FBU.y,
+                                               this._FBU.width, this._FBU.height,
+                                               this._sock, this._display,
+                                               this._fbDepth);
+            if (decoded && this._firstFrame === 'waiting' && this._FBU.width && this._FBU.height) {
+                this._firstFrame = 'pending';
+            }
+            return decoded;
         } catch (err) {
             this._fail("Error decoding rect: " + err);
             return false;

@@ -20,6 +20,8 @@ export default class AsyncClipboard {
         // ===== EVENT HANDLERS =====
 
         this.onpaste = () => {};
+        // May resolve true when the clipboard was handled as something else
+        this.onbeforepaste = async () => false;
     }
 
     // ===== PRIVATE METHODS =====
@@ -38,6 +40,7 @@ export default class AsyncClipboard {
     async _handleFocus(event) {
         if (!(await this._ensureAvailable())) return;
         try {
+            if (await this.onbeforepaste()) return;
             const text = await navigator.clipboard.readText();
             this.onpaste(text);
         } catch (error) {

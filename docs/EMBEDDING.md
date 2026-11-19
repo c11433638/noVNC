@@ -53,8 +53,21 @@ Currently, the following options are available:
 * `reconnect` - If noVNC should automatically reconnect if the connection is
   dropped.
 
-* `reconnect_delay` - How long to wait in milliseconds before attempting to
-  reconnect.
+* `reconnect_delay` - Initial reconnect delay in milliseconds. Subsequent
+  failures double the delay up to 30 seconds, or the configured initial
+  delay if it is already longer.
+
+* `fallback_url` - An optional second WebSocket URL for the same desktop.
+  Set it in `defaults.json` or `mandatory.json`. noVNC tries it once if the
+  primary connection fails or the handshake stalls for four seconds.
+  Each URL uses the same WebSocket scheme. Configure URLs you operate or trust.
+
+* `low_bandwidth` - Enables the color preset with reduced JPEG quality and
+  a desktop size limited to 1600×900 (900×1600 in portrait when using remote
+  resizing). With local-only phone scaling the preset only changes encoding.
+
+* `phone_local_scale` - Fit the existing desktop in phone mode and allow
+  pinch zoom without resizing the remote desktop.
 
 * `host` - The WebSocket host to connect to. This setting is deprecated
   in favor of specifying a URL in `path`.
@@ -93,10 +106,9 @@ Currently, the following options are available:
 
 * `compression` - The session compression level. Can be `0` to `9`.
 
-* `fast_mode` - Low bandwidth mode (default `false`). Uses JPEG quality `0`,
-  compression `6`, and server-side grayscale JPEG where supported, without
-  imposing a frame rate limit. Can be toggled while connected;
-  disabling it restores the saved quality/compression settings and color.
+* `fast_mode` - Turbo mode (default `false`). Uses JPEG quality `0`,
+  compression `6`, and server-side grayscale JPEG where supported. Can be
+  toggled while connected. Disabling it restores color and the saved settings.
   For example: `vnc.html?fast_mode=true`. The checkbox is in Settings.
   Lossless rectangles are desaturated locally; their color bytes are still
   transmitted. The server may ignore JPEG grayscale/compression extensions.

@@ -3,5 +3,5 @@
     "resize": "scale",
     "desktop_size": "1920x1080",
     "reconnect": true,
-    "reconnect_delay": 2000
+    "reconnect_delay": 1000
 }

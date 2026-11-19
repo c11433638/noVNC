@@ -23,15 +23,18 @@ import struct
 import sys
 import threading
 import time
+import zipfile
 from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "websockify"))
 sys.path.insert(0, str(REPO / "utils"))
 from text_input import TextInputUnavailable, X11TextInput
 import window_fit
+from file_clipboard import (ClipboardUnavailable, MAX_IMAGE_BYTES, clipboard_image,
+                            clipboard_state, desktop_selection)
 from websockify.websocket import WebSocketWantReadError
 from websockify.websocketproxy import ProxyRequestHandler, WebSocketProxy
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
@@ -52,12 +55,9 @@ IDLE_SECONDS = 20
 # phrase a new connection. The page pings it well within this limit.
 INPUT_SOCKET = API + "input-socket"
 INPUT_SOCKET_SECONDS = 90
-# A CDN reaches this server through a different node for every connection,
-# and some of them are far away. A page that says which attempt this is
-# gets told to try again while the node is slow and attempts remain.
-SLOW_ROUTE_CLOSE = 4008
-ROUTE_ATTEMPTS = 4
 LINE_ID = re.compile(r"[A-Za-z0-9]{8,32}")
+CLIPBOARD_TOKEN = re.compile(r"[0-9a-f]{32}")
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 LINE_SECONDS = 2
 
 
@@ -77,11 +77,32 @@ COOKIE = "novnc_files"
 BROWSER_COOKIE = "novnc_browser"
 CHUNK_SIZE = 16 * 1024 * 1024
 MAX_FILE_SIZE = 10 * 1024 ** 3
+CLIPBOARD_FILE_LIMIT = 100
+CLIPBOARD_SECONDS = 3600
+CLIPBOARD_FOLDER = "folder"
 SESSION_SECONDS = 8 * 3600
 REMEMBER_SECONDS = 7 * 24 * 3600
 UPLOAD_SECONDS = 24 * 3600
 # TigerVNC's d3des implementation reverses key bits before standard DES.
 PASSWORD_FILE_KEY = bytes([232, 74, 214, 96, 196, 114, 26, 224])
+
+
+class ChunkedWriter:
+    """Write an HTTP response body using chunked transfer encoding."""
+
+    def __init__(self, output):
+        self.output = output
+
+    def write(self, data):
+        if len(data):
+            self.output.write(b"%x\r\n" % len(data) + bytes(data) + b"\r\n")
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def finish(self):
+        self.output.write(b"0\r\n\r\n")
 
 
 class APIError(Exception):
@@ -110,6 +131,8 @@ class FileStore:
                        (secrets.token_bytes(32),))
             self.secret = db.execute("SELECT value FROM settings WHERE name = 'session_secret'").fetchone()[0]
             db.execute("CREATE TABLE IF NOT EXISTS revoked (owner TEXT PRIMARY KEY, expiry INTEGER)")
+            db.execute("""CREATE TABLE IF NOT EXISTS clipboard_downloads
+                          (token TEXT PRIMARY KEY, owner TEXT, path TEXT, revision TEXT, expiry INTEGER)""")
 
     @contextlib.contextmanager
     def rate_db(self):
@@ -234,12 +257,159 @@ class FileStore:
                         continue
                     if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                         continue
-                    entries.append({"name": entry.name,
-                                    "directory": stat.S_ISDIR(info.st_mode),
-                                    "size": info.st_size, "modified": info.st_mtime})
+                    directory = stat.S_ISDIR(info.st_mode)
+                    item = {"name": entry.name, "directory": directory,
+                            "size": info.st_size, "modified": info.st_mtime}
+                    if not directory:
+                        item["trashId"] = self.file_revision(info)
+                    entries.append(item)
         entries.sort(key=lambda e: (not e["directory"], e["name"].casefold()))
         return {"path": path, "entries": entries, "root": str(self.root),
                 "chunkSize": CHUNK_SIZE, "maxFileSize": MAX_FILE_SIZE}
+
+    @staticmethod
+    def file_revision(info):
+        return f"{info.st_dev:x}-{info.st_ino:x}-{info.st_ctime_ns:x}"
+
+    def clipboard_uris(self, paths):
+        if not isinstance(paths, list) or not 0 < len(paths) <= CLIPBOARD_FILE_LIMIT:
+            raise APIError(400, "invalid_clipboard_selection")
+        uris = []
+        for path in paths:
+            parts = self.components(path)
+            if not parts:
+                raise APIError(400, "invalid_path")
+            with self.directory("/".join(parts[:-1])) as fd:
+                info = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise APIError(403, "invalid_path")
+            uris.append(self.root.joinpath(*parts).as_uri().encode("ascii"))
+        return uris
+
+    @staticmethod
+    def open_copied_file(path):
+        parts = Path(path).parts
+        if len(parts) < 2 or parts[0] != "/" or ".." in parts or "\0" in path:
+            raise APIError(400, "invalid_path")
+        # Open the clipboard entry without following symlinks or opening a
+        # device. Reopen the verified inode itself for reading.
+        flags = os.O_PATH | os.O_NOFOLLOW
+        fd = os.open("/", flags | os.O_DIRECTORY)
+        try:
+            for part in parts[1:-1]:
+                child = os.open(part, flags | os.O_DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            entry = os.open(parts[-1], flags, dir_fd=fd)
+            os.close(fd)
+            fd = entry
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise APIError(403, "invalid_path")
+            return open(f"/proc/self/fd/{fd}", "rb")
+        finally:
+            os.close(fd)
+
+    def register_clipboard(self, owner, selection):
+        rows, files = [], []
+        paths = set()
+        skipped = 0
+        now = int(time.time())
+        for line in selection.splitlines():
+            if not line or line.startswith(b"#"):
+                continue
+            try:
+                uri = urlsplit(line.rstrip(b"\0").decode("utf-8"))
+                if (uri.scheme != "file" or uri.netloc.lower() not in ("", "localhost") or
+                        uri.query or uri.fragment):
+                    raise ValueError
+                # File managers report the path as browsed, which may pass
+                # through shortcuts such as the transfer folder on the desktop.
+                path = os.path.realpath(unquote(uri.path, errors="strict"))
+                if path in paths:
+                    continue
+                if len(files) >= CLIPBOARD_FILE_LIMIT:
+                    skipped += 1
+                    continue
+                token = secrets.token_hex(16)
+                if os.path.isdir(path):
+                    if path == "/":
+                        raise ValueError
+                    revision = CLIPBOARD_FOLDER
+                    entry = {"id": token, "name": Path(path).name + ".zip", "size": 0, "folder": True}
+                else:
+                    with self.open_copied_file(path) as file:
+                        info = os.fstat(file.fileno())
+                    revision = self.file_revision(info)
+                    entry = {"id": token, "name": Path(path).name, "size": info.st_size}
+                paths.add(path)
+                rows.append((token, owner, path, revision, now + CLIPBOARD_SECONDS))
+                files.append(entry)
+            except (OSError, ValueError, APIError):
+                skipped += 1
+        with self.rate_db() as db:
+            db.execute("DELETE FROM clipboard_downloads WHERE expiry <= ?", (now,))
+            db.executemany("INSERT INTO clipboard_downloads VALUES (?, ?, ?, ?, ?)", rows)
+            db.execute("""DELETE FROM clipboard_downloads WHERE owner = ? AND token NOT IN (
+                            SELECT token FROM clipboard_downloads WHERE owner = ?
+                            ORDER BY rowid DESC LIMIT ?)""",
+                       (owner, owner, 4 * CLIPBOARD_FILE_LIMIT))
+        return {"files": files, "skipped": skipped}
+
+    def clipboard_folder(self, token, owner):
+        with self.rate_db() as db:
+            entry = db.execute("""SELECT path FROM clipboard_downloads
+                                  WHERE token = ? AND owner = ? AND revision = ? AND expiry > ?""",
+                               (token, owner, CLIPBOARD_FOLDER, int(time.time()))).fetchone()
+        return entry and entry[0]
+
+    @contextlib.contextmanager
+    def clipboard_download(self, token, owner):
+        with self.rate_db() as db:
+            entry = db.execute("""SELECT path, revision FROM clipboard_downloads
+                                  WHERE token = ? AND owner = ? AND expiry > ?""",
+                               (token, owner, int(time.time()))).fetchone()
+        if entry is None:
+            raise APIError(404, "not_found")
+        path, revision = entry
+        with self.open_copied_file(path) as file:
+            if self.file_revision(os.fstat(file.fileno())) != revision:
+                raise APIError(409, "file_changed")
+            yield file, Path(path).name
+
+    def save_clipboard_image(self, image):
+        """Keep the latest pasted image where file managers can copy it from."""
+        folder = self.state / "clipboard"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        target = folder / "clipboard-image.png"
+        partial = folder / f".{secrets.token_hex(8)}.part"
+        try:
+            with open(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as file:
+                file.write(image)
+            os.replace(partial, target)
+        finally:
+            partial.unlink(missing_ok=True)
+        return target
+
+    def trash(self, path, revision):
+        parts = self.components(path)
+        if not parts or not isinstance(revision, str):
+            raise APIError(400, "invalid_path")
+        name = parts[-1]
+        with self.directory("/".join(parts[:-1])) as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise APIError(403, "invalid_path")
+            if revision != self.file_revision(info):
+                raise APIError(409, "file_changed")
+            # Run from the verified parent directory. GIO handles the desktop
+            # Trash metadata, duplicate names and separate volumes.
+            try:
+                subprocess.run(["gio", "trash", "./" + name], cwd=f"/proc/self/fd/{fd}",
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               check=True, timeout=15)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise APIError(409, "trash_unavailable") from exc
 
     def create_upload(self, owner, data):
         name, path, size = data.get("name"), data.get("path", ""), data.get("size")
@@ -331,45 +501,40 @@ class FileRequestHandler(ProxyRequestHandler):
             self.serve_input_socket()
             return
         query = parse_qs(urlsplit(self.path).query)
-        attempt = query.get("route", [""])[0]
-        attempt = int(attempt) if attempt.isdigit() else None
-        stats = line_stats(self.connection)
-        limit = self.server.slow_route_ms
-        if stats:
-            self.log_message("line: %d ms round trip, attempt %s", stats["rtt"], attempt or "-")
-            if limit and attempt and attempt < ROUTE_ATTEMPTS and stats["micros"] > limit * 1000:
-                with contextlib.suppress(Exception):
-                    self.request.close(SLOW_ROUTE_CLOSE, "slow route")
-                return
         # The VNC stream has no idle limit and must never time out on a
         # slow send.
         self.connection.settimeout(None)
+        stats = line_stats(self.connection)
+        if stats and stats["rtt"] > 0:
+            self.log_message("line: %d ms round trip", stats["rtt"])
         line = query.get("line", [""])[0]
         report = None
-        if stats and LINE_ID.fullmatch(line):
+        if LINE_ID.fullmatch(line):
             report = self.server.file_store.state / "lines" / (line + ".json")
-            threading.Thread(target=self.report_line, args=(report, attempt), daemon=True).start()
+            stop = threading.Event()
+            reporter = threading.Thread(target=self.report_line, args=(report, stop), daemon=True)
+            reporter.start()
         try:
             super().new_websocket_client()
         finally:
             if report:
+                stop.set()
+                reporter.join()
                 with contextlib.suppress(OSError):
                     report.unlink()
 
-    def report_line(self, report, attempt):
+    def report_line(self, report, stop):
         """Keep a note of how this connection is doing, for the page to show."""
         report.parent.mkdir(mode=0o700, exist_ok=True)
-        while True:
+        while not stop.is_set():
             stats = line_stats(self.connection)
             if stats is None:
                 return
-            limit = self.server.slow_route_ms
-            stats.update(node=self.client_address[0], attempt=attempt,
-                         slow=bool(limit) and stats["micros"] > limit * 1000)
+            stats.update(node=self.client_address[0])
             if self.client_address[0] in ("127.0.0.1", "::1"):
                 # A tunnel on this machine: its line is not ours to measure.
                 # Cloudflare names the data center the browser reached.
-                stats = {"attempt": attempt, "node": "127.0.0.1"}
+                stats = {"node": "127.0.0.1"}
                 place = self.headers.get("CF-Ray", "").rpartition("-")[2]
                 if re.fullmatch(r"[A-Za-z]{3}", place):
                     stats["node"] = "Cloudflare " + place.upper()
@@ -379,7 +544,7 @@ class FileRequestHandler(ProxyRequestHandler):
                 os.replace(scratch, report)
             except OSError:
                 return
-            time.sleep(LINE_SECONDS)
+            stop.wait(LINE_SECONDS)
 
     def type_text(self, text):
         display = getattr(self.server, "text_input_display", None)
@@ -598,10 +763,10 @@ class FileRequestHandler(ProxyRequestHandler):
             raise APIError(413, "file_too_large")
         return length
 
-    def read_json(self):
+    def read_json(self, maximum=16384):
         if self.headers.get_content_type() != "application/json":
             raise APIError(415, "invalid_request")
-        length = self.body_length(16384)
+        length = self.body_length(maximum)
         body = self.rfile.read(length)
         if len(body) != length:
             raise APIError(400, "incomplete_upload")
@@ -612,6 +777,112 @@ class FileRequestHandler(ProxyRequestHandler):
             return result
         except (ValueError, UnicodeError):
             raise APIError(400, "invalid_request") from None
+
+    def desktop_clipboard(self, function, *args):
+        display = getattr(self.server, "text_input_display", None)
+        if not display:
+            raise APIError(501, "clipboard_unavailable")
+        try:
+            return function(display, *args)
+        except ClipboardUnavailable:
+            raise APIError(501, "clipboard_unavailable") from None
+
+    def file_clipboard(self, paths=None):
+        return self.desktop_clipboard(desktop_selection, paths)
+
+    def watch_clipboard(self, owner, since):
+        if since and not CLIPBOARD_TOKEN.fullmatch(since):
+            raise APIError(400, "invalid_request")
+        state = self.desktop_clipboard(clipboard_state, since)
+        uris = state.pop("uris")
+        if state["changed"] and state["kind"] == "files":
+            state.update(self.server.file_store.register_clipboard(owner, uris))
+        return state
+
+    def receive_clipboard_image(self):
+        length = self.body_length(MAX_IMAGE_BYTES)
+        image = self.rfile.read(length)
+        if len(image) != length:
+            raise APIError(400, "incomplete_upload")
+        if not image.startswith(PNG_SIGNATURE):
+            raise APIError(415, "invalid_request")
+        path = self.server.file_store.save_clipboard_image(image)
+        self.desktop_clipboard(desktop_selection, [path.as_uri().encode("ascii")], path)
+
+    def send_clipboard_image(self):
+        image = self.desktop_clipboard(clipboard_image)
+        if not image:
+            raise APIError(404, "not_found")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(image)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(image)
+
+    def send_download(self, file, name):
+        info = os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise APIError(403, "invalid_path")
+        # A validator lets browsers resume an interrupted download.
+        etag = '"%x-%x"' % (info.st_mtime_ns, info.st_size)
+        start, end = self.byte_range(info.st_size, etag)
+        partial = (start, end) != (0, info.st_size - 1) and info.st_size > 0
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
+        if partial:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, info.st_size))
+        self.send_header("Content-Disposition",
+                         "attachment; filename=\"download\"; filename*=UTF-8''" + quote(name, safe=""))
+        remaining = end - start + 1 if info.st_size else 0
+        self.send_header("Content-Length", str(remaining))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        file.seek(start)
+        while remaining:
+            chunk = file.read(min(remaining, 256 * 1024))
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+            remaining -= len(chunk)
+
+    def send_folder(self, path):
+        """Stream a folder as a zip archive, which needs no temporary copy."""
+        root = Path(path)
+        if not root.is_dir():
+            raise APIError(404, "not_found")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", "attachment; filename=\"download.zip\"; filename*=UTF-8''" +
+                         quote(root.name + ".zip", safe=""))
+        # The size is unknown in advance. Chunks mark the end explicitly,
+        # so an interrupted download cannot look like a finished one.
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        output = ChunkedWriter(self.wfile)
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
+            for folder, folders, names in os.walk(root):
+                folders.sort()
+                relative = Path(root.name, Path(folder).relative_to(root))
+                if not folders and not names:
+                    archive.writestr(relative.as_posix() + "/", b"")
+                for name in sorted(names):
+                    source = Path(folder, name)
+                    try:
+                        if not stat.S_ISREG(source.lstat().st_mode):
+                            continue
+                        file = open(source, "rb")
+                    except (PermissionError, FileNotFoundError):
+                        continue  # Unreadable, or removed during the download
+                    with file:
+                        info = zipfile.ZipInfo.from_file(source, (relative / name).as_posix(),
+                                                         strict_timestamps=False)
+                        with archive.open(info, "w", force_zip64=True) as target:
+                            shutil.copyfileobj(file, target, 256 * 1024)
+        output.finish()
 
     def dispatch(self):
         self.own_cache_control = False
@@ -685,6 +956,30 @@ class FileRequestHandler(ProxyRequestHandler):
             self.reply(200, {"typed": True})
         elif endpoint == "list" and self.command == "GET":
             self.reply(200, store.listing(param("path")))
+        elif endpoint == "trash" and self.command == "POST":
+            data = self.read_json()
+            store.trash(data.get("path"), data.get("revision"))
+            self.reply(200, {})
+        elif endpoint == "clipboard-watch" and self.command == "GET":
+            self.reply(200, self.watch_clipboard(owner, param("since")))
+        elif endpoint == "clipboard-image" and self.command == "GET":
+            self.send_clipboard_image()
+        elif endpoint == "clipboard-image" and self.command == "POST":
+            self.receive_clipboard_image()
+            self.reply(200, {})
+        elif endpoint == "clipboard-list" and self.command == "POST":
+            self.reply(200, store.register_clipboard(owner, self.file_clipboard()))
+        elif endpoint == "clipboard" and self.command == "POST":
+            paths = self.read_json(512 * 1024).get("paths")
+            self.file_clipboard(store.clipboard_uris(paths))
+            self.reply(200, {})
+        elif endpoint == "clipboard-download" and self.command == "GET":
+            folder = store.clipboard_folder(param("id"), owner)
+            if folder:
+                self.send_folder(folder)
+                return
+            with store.clipboard_download(param("id"), owner) as (file, name):
+                self.send_download(file, name)
         elif endpoint == "download" and self.command == "GET":
             parts = store.components(param("path"))
             if not parts:
@@ -693,34 +988,7 @@ class FileRequestHandler(ProxyRequestHandler):
                 file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                                   dir_fd=fd)
             with os.fdopen(file_fd, "rb") as file:
-                info = os.fstat(file.fileno())
-                if not stat.S_ISREG(info.st_mode):
-                    raise APIError(403, "invalid_path")
-                # A validator lets browsers resume an interrupted download.
-                etag = '"%x-%x"' % (info.st_mtime_ns, info.st_size)
-                start, end = self.byte_range(info.st_size, etag)
-                partial = (start, end) != (0, info.st_size - 1) and info.st_size > 0
-                self.send_response(206 if partial else 200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("ETag", etag)
-                if partial:
-                    self.send_header("Content-Range",
-                                     "bytes %d-%d/%d" % (start, end, info.st_size))
-                self.send_header("Content-Disposition",
-                                 "attachment; filename=\"download\"; filename*=UTF-8''" +
-                                 quote(parts[-1], safe=""))
-                remaining = end - start + 1 if info.st_size else 0
-                self.send_header("Content-Length", str(remaining))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                file.seek(start)
-                while remaining:
-                    chunk = file.read(min(remaining, 256 * 1024))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
+                self.send_download(file, parts[-1])
         elif endpoint == "upload" and self.command == "GET":
             with store.upload(param("id"), owner) as (file, meta, part, manifest):
                 self.reply(200, {"offset": os.fstat(file.fileno()).st_size})
@@ -804,9 +1072,8 @@ def main():
     parser.add_argument("--cert", default=str(REPO / "self.pem"))
     parser.add_argument("--key")
     parser.add_argument("--ssl-only", action="store_true")
-    parser.add_argument("--slow-route-ms", type=float, default=90,
-                        help="Round trip time above which a page is asked to "
-                             "connect again for a nearer CDN node; 0 never asks")
+    # Accept the old flag so existing launchers still start.
+    parser.add_argument("--slow-route-ms", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, filename=args.log_file,
                         format="%(asctime)s %(message)s")
@@ -817,7 +1084,6 @@ def main():
                             web=args.web, file_only=True, daemon=args.daemon,
                             cert=args.cert, key=args.key, ssl_only=args.ssl_only)
     server.file_store = store
-    server.slow_route_ms = args.slow_route_ms
     server.text_input_display = args.input_display
     if (server.text_input_display is None and
             args.target_host in ("127.0.0.1", "localhost", "::1") and

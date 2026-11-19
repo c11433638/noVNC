@@ -62,12 +62,15 @@ git -C websockify apply ../docs/websockify-local.patch
 
 ## Ubuntu 桌面环境
 
+TigerVNC 默认只在本机回环接口监听。需要原生 VNC 客户端直连时，使用
+`VNC_LOCALHOST=no ./vnc-control.sh start` 启动桌面。
+
 当前启动脚本使用 TigerVNC、Xfce 和 IBus 拼音。在 Ubuntu 上安装所需组件：
 
 ```sh
 sudo apt update
 sudo apt install tigervnc-standalone-server tigervnc-tools xfce4 dbus-x11 \
-    ibus ibus-libpinyin python3-cryptography python3-numpy
+    ibus ibus-libpinyin libglib2.0-bin python3-cryptography python3-numpy
 mkdir -p "$HOME/.vnc"
 chmod 700 "$HOME/.vnc"
 tigervncpasswd "$HOME/.vnc/passwd"

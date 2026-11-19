@@ -16,6 +16,10 @@ const ERRORS = {
     'invalid_offset': 'Upload interrupted. Please try again.',
     'upload_expired': 'Upload expired. Please try again.',
     'too_many_uploads': 'Too many uploads. Please try again later.',
+    'file_changed': 'This file has changed. Refresh the list and try again.',
+    'trash_unavailable': 'The desktop trash is unavailable for this file.',
+    'clipboard_unavailable': 'The remote file clipboard is unavailable.',
+    'invalid_clipboard_selection': 'Select up to 100 files at a time.',
 };
 
 // Unfinished uploads, so picking the same file again (also after a page
@@ -45,7 +49,7 @@ function saveResumeRecord(key, id) {
     } catch (err) { /* Resuming is optional. */ }
 }
 
-function sizeLabel(bytes) {
+export function sizeLabel(bytes) {
     const units = ['B', 'KB', 'MB', 'GB'];
     let unit = 0;
     while (bytes >= 1024 && unit < units.length - 1) {
@@ -73,6 +77,7 @@ export default class FileTransfer {
         this._maxFileSize = 10 * 1024 ** 3;
         this._revision = 0;
         this._autoPassword = true;
+        this._readClipboardAfterLogin = false;
 
         this._element('auth').addEventListener('submit', e => this._login(e));
         this._element('refresh').addEventListener('click', () => this.refresh());
@@ -132,17 +137,21 @@ export default class FileTransfer {
         this._message(error.message, true);
     }
 
-    async _list(path) {
+    async _requestWithSession(endpoint, params = {}, data = undefined) {
         try {
-            return await this._request('list', { path });
+            return await this._request(endpoint, params, data);
         } catch (err) {
             if (err.code !== 'authentication_required' || !this._autoPassword) throw err;
             const password = this._getPassword();
             if (password === undefined || password === null) throw err;
             this._autoPassword = false;
             await this._request('session', {}, { password });
-            return await this._request('list', { path });
+            return await this._request(endpoint, params, data);
         }
+    }
+
+    _list(path) {
+        return this._requestWithSession('list', { path });
     }
 
     async _login(e) {
@@ -153,7 +162,8 @@ export default class FileTransfer {
         this._element('login').disabled = true;
         try {
             await this._request('session', {}, { password });
-            await this.refresh();
+            if (this._readClipboardAfterLogin) await this.readClipboard();
+            else await this.refresh();
         } catch (err) {
             this._showAuth(err);
         } finally {
@@ -161,7 +171,7 @@ export default class FileTransfer {
         }
     }
 
-    async refresh(path = this._path) {
+    async refresh(path = this._path, message = '') {
         if (this._busy) return;
         const revision = ++this._revision;
         this._message(_('Loading files…'));
@@ -169,7 +179,7 @@ export default class FileTransfer {
             const data = await this._list(path);
             if (revision !== this._revision) return;
             this._render(data);
-            this._message('');
+            this._message(message);
         } catch (err) {
             if (revision !== this._revision) return;
             if (err.code === 'authentication_required' || err.code === 'invalid_password') {
@@ -218,6 +228,13 @@ export default class FileTransfer {
                 row.appendChild(size);
             }
             row.appendChild(action);
+            if (entry.trashId) {
+                const trash = document.createElement('button');
+                trash.type = 'button';
+                trash.textContent = _('Move to Trash');
+                trash.addEventListener('click', () => this._trash(path, entry));
+                row.appendChild(trash);
+            }
             list.appendChild(row);
         }
     }
@@ -238,7 +255,122 @@ export default class FileTransfer {
         }
     }
 
-    _setBusy(busy) {
+    copyToClipboard(paths) {
+        return this._request('clipboard', {}, { paths });
+    }
+
+    watchClipboard(since) {
+        return this._requestWithSession('clipboard-watch', { since });
+    }
+
+    async clipboardImage() {
+        const response = await fetch(this._url('clipboard-image'), {
+            credentials: 'same-origin',
+            cache: 'no-store',
+        });
+        if (!response.ok) throw new TransferError('clipboard_unavailable');
+        return new Blob([await response.arrayBuffer()], { type: 'image/png' });
+    }
+
+    async sendClipboardImage(blob) {
+        const send = () => fetch(this._url('clipboard-image'), {
+            method: 'POST',
+            headers: { 'X-NoVNC-Transfer': '1', 'Content-Type': 'image/png' },
+            body: blob,
+            credentials: 'same-origin',
+            cache: 'no-store',
+        });
+        let response = await send();
+        if (response.status === 401) {
+            // Signs in with the connection password, when there is one
+            await this._requestWithSession('list', { path: '' });
+            response = await send();
+        }
+        if (!response.ok) {
+            const { error } = await response.json().catch(() => ({}));
+            throw new TransferError(error || 'clipboard_unavailable');
+        }
+    }
+
+    _save(href, name) {
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
+    saveClipboardImage() {
+        this._save(this._url('clipboard-image'), 'remote-clipboard.png');
+    }
+
+    async saveClipboardFiles(files) {
+        for (const [index, file] of files.entries()) {
+            // Browsers drop downloads started in the same instant.
+            if (index) await new Promise(resolve => setTimeout(resolve, 500));
+            this._save(this._url('clipboard-download', { id: file.id }), file.name);
+        }
+    }
+
+    async readClipboard() {
+        if (this._busy) return;
+        ++this._revision;
+        this._readClipboardAfterLogin = false;
+        this._setBusy(true, false);
+        this._message(_('Reading the remote file clipboard…'));
+        const list = this._element('clipboard_list');
+        list.replaceChildren();
+        try {
+            const { files, skipped } = await this._requestWithSession('clipboard-list', {}, {});
+            this._element('auth').classList.add('noVNC_hidden');
+            for (const file of files) {
+                const row = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = this._url('clipboard-download', { id: file.id });
+                link.download = file.name;
+                link.textContent = file.name;
+                row.append(link);
+                if (!file.folder) row.append(' · ' + sizeLabel(file.size));
+                list.appendChild(row);
+            }
+            let message = files.length ? _('Select a copied file above to download it.') :
+                _('No files found. Copy files in the remote file manager, then try again.');
+            if (skipped) message += ' ' + _('Some clipboard items could not be downloaded.');
+            this._message(message);
+        } catch (err) {
+            if (err.code === 'authentication_required' || err.code === 'invalid_password') {
+                this._readClipboardAfterLogin = true;
+                this._showAuth(err);
+            } else {
+                this._message(err.message, true);
+            }
+        } finally {
+            this._setBusy(false);
+        }
+    }
+
+    async _trash(path, entry) {
+        if (this._busy || !window.confirm(_('Move “%s” to the remote desktop Trash?')
+            .replace('%s', () => entry.name))) return;
+
+        ++this._revision;
+        this._setBusy(true, false);
+        this._message(_('Moving file to Trash…'));
+        try {
+            await this._request('trash', {}, { path, revision: entry.trashId });
+        } catch (err) {
+            if (err.code === 'authentication_required') this._showAuth(err);
+            else this._message(err.message, true);
+            return;
+        } finally {
+            this._setBusy(false);
+        }
+        await this.refresh(this._path, _('File moved to Trash.'));
+        this._element('refresh').focus();
+    }
+
+    _setBusy(busy, showProgress = busy) {
         this._busy = busy;
         this._element('input').disabled = busy;
         this._element('refresh').disabled = busy;
@@ -246,7 +378,7 @@ export default class FileTransfer {
         for (const button of this._element('list').querySelectorAll('button')) {
             button.disabled = busy;
         }
-        this._element('progress_area').classList.toggle('noVNC_hidden', !busy);
+        this._element('progress_area').classList.toggle('noVNC_hidden', !showProgress);
     }
 
     _sendChunk(id, blob, offset, progress) {
@@ -315,8 +447,12 @@ export default class FileTransfer {
         }
     }
 
-    async upload(files) {
+    async upload(files, { onUploaded } = {}) {
         if (!files.length || this._busy) return;
+        if (onUploaded && files.length > 100) {
+            this._message(_('Select up to 100 files at a time.'), true);
+            return;
+        }
         const total = files.reduce((sum, file) => sum + file.size, 0);
         let completed = 0;
         let count = 0;
@@ -327,6 +463,7 @@ export default class FileTransfer {
         this._setBusy(true);
         this._element('progress').value = 0;
         const renamed = [];
+        const uploaded = [];
         let message;
         let error = false;
         try {
@@ -366,12 +503,18 @@ export default class FileTransfer {
                 if (this._cancelled) throw new DOMException('', 'AbortError');
                 const result = await this._request('complete', { id }, {});
                 if (result.name !== file.name) renamed.push(result.name);
+                if (onUploaded) uploaded.push(this._path ? this._path + '/' + result.name : result.name);
                 saveResumeRecord(resumeKey, null);
                 id = null;
                 completed += file.size;
                 count++;
             }
-            message = _('Upload complete.') + ` (${count})`;
+            if (onUploaded) {
+                await onUploaded(uploaded);
+                message = _('Files copied. Press Ctrl+V in the remote file manager.');
+            } else {
+                message = _('Upload complete.') + ` (${count})`;
+            }
             if (renamed.length) message += ' ' + _('Saved with a new name:') + ' ' + renamed.join(', ');
         } catch (err) {
             message = this._cancelled ? _('Upload cancelled.') : err.message;

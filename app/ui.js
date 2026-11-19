@@ -17,14 +17,16 @@ import keysyms from "../core/input/keysymdef.js";
 import Keyboard from "../core/input/keyboard.js";
 import RFB from "../core/rfb.js";
 import WakeLockManager from './wakelock.js';
-import FileTransfer from './file-transfer.js';
+import FileTransfer, { sizeLabel } from './file-transfer.js';
 import * as BrowserSession from './browser-session.js';
 import * as WebUtil from "./webutil.js";
 
 const PAGE_TITLE = "noVNC";
 
-// How our gateway closes a connection that came over a slow line
-const SLOW_ROUTE_CLOSE = 4008;
+const FALLBACK_TIMEOUT = 4000;
+const RECONNECT_DELAY = 1000;
+const MAX_RECONNECT_DELAY = 30000;
+const LOW_BANDWIDTH_SIZE = { w: 1600, h: 900 };
 
 const LINGUAS = ["cs", "de", "el", "es", "fr", "hr", "hu", "it", "ja", "ko", "nl", "pl", "pt_BR", "ru", "sv", "tr", "uk", "zh_CN", "zh_TW"];
 
@@ -53,6 +55,7 @@ const UI = {
     smallTouchScreen: false,
     fullViewport: { w: 0, h: 0 },
     fitWindowsTimer: null,
+    phoneWindowsFitted: false,
     mobileKeyboardOpen: false,
     minPhoneDesktopSide: 600,
     mobileKeys: {
@@ -87,7 +90,27 @@ const UI = {
     inhibitReconnect: true,
     reconnectCallback: null,
     reconnectPassword: null,
+    reconnectAttempts: 0,
+    connectionTimeout: null,
+    connectionTimedOut: false,
+    fallbackURL: null,
+    connectionStartedAt: null,
+    firstFrameMs: null,
     sameOriginConnection: false,
+    clipboardWatchRevision: 0,
+    clipboardNoticeTimer: null,
+    localImageBaseline: null,
+    localImagePublished: null,
+    localImageSync: null,
+    remoteCopiedSinceConnect: false,
+    pasteKeyHeld: false,
+    pasteModifierHeld: false,
+    pendingPaste: null,
+    pendingPasteTimer: null,
+    localFilesPublished: null,
+    remoteFilesAt: 0,
+    remotePathHold: null,
+    encryptedConnection: false,
     rememberPendingPassword: null,
     sessionRequest: null,
     browserLoginTask: null,
@@ -110,12 +133,12 @@ const UI = {
             Math.min(window.screen.width, window.screen.height) <= 600;
         if (UI.smallTouchScreen) {
             const defaults = UI.customSettings.defaults;
-            defaults.remote_scale = String(defaults.mobile_remote_scale || '1.5');
+            defaults['remote_scale'] = String(defaults.mobile_remote_scale || '1.5');
         }
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261114b');
+            await l10n.setup(LINGUAS, "app/locale/", '20261118b');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -245,9 +268,11 @@ const UI = {
         UI.initSetting('resize', 'remote');
         UI.initSetting('remote_scale', '1');
         UI.initSetting('device_mode', 'auto');
+        UI.initSetting('phone_local_scale', false);
         UI.initSetting('quality', 6);
         UI.initSetting('compression', 2);
         UI.initSetting('fast_mode', false);
+        UI.initSetting('low_bandwidth', false);
         UI.initSetting('dynamic_quality', true);
         UI.updateFastMode();
         UI.initSetting('shared', true);
@@ -265,7 +290,7 @@ const UI = {
         UI.initSetting('path', 'websockify');
         UI.initSetting('repeaterID', '');
         UI.initSetting('reconnect', false);
-        UI.initSetting('reconnect_delay', 5000);
+        UI.initSetting('reconnect_delay', RECONNECT_DELAY);
         UI.initSetting('keep_device_awake', false);
     },
     // Adds a link to the label elements on the corresponding input elements
@@ -554,6 +579,29 @@ const UI = {
             .addEventListener('click', UI.toggleClipboardPanel);
         document.getElementById("noVNC_clipboard_text")
             .addEventListener('change', UI.clipboardSend);
+        document.getElementById('noVNC_clipboard').addEventListener('paste', (e) => {
+            if (!UI.canTransferClipboardFiles()) return;
+            const data = e.clipboardData;
+            if (!data?.files.length && !Array.from(data?.types || []).includes('Files')) return;
+            e.preventDefault();
+            const files = Array.from(data.files);
+            if (files.length) UI.clipboardUpload(files);
+        });
+        document.getElementById('noVNC_clipboard_file_input').addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            e.target.value = '';
+            UI.clipboardUpload(files);
+        });
+        document.getElementById('noVNC_clipboard_notice_close')
+            .addEventListener('click', UI.hideClipboardNotice);
+        window.addEventListener('keydown', UI.handlePasteKeyDown, true);
+        window.addEventListener('keyup', UI.handlePasteKeyUp, true);
+        window.addEventListener('paste', UI.handleDesktopPaste, true);
+        document.getElementById('noVNC_clipboard_read_files').addEventListener('click', () => {
+            if (!UI.canTransferClipboardFiles()) return;
+            UI.openFilesPanel(false);
+            UI.fileTransfer.readClipboard();
+        });
     },
 
     // Add a call to save settings when the element changes,
@@ -573,20 +621,24 @@ const UI = {
         UI.addSettingChangeHandler('encrypt');
         UI.addSettingChangeHandler('resize');
         UI.addSettingChangeHandler('resize', UI.applyResizeMode);
-        UI.addSettingChangeHandler('resize', UI.updateViewClip);
         UI.addSettingChangeHandler('resize', UI.fitRemoteWindows);
         UI.addSettingChangeHandler('resize', () => { if (UI.rfb) UI.rfb.resetViewZoom(); });
         UI.addSettingChangeHandler('device_mode');
         UI.addSettingChangeHandler('device_mode', UI.applyDeviceMode);
+        UI.addSettingChangeHandler('phone_local_scale');
+        UI.addSettingChangeHandler('phone_local_scale', UI.applyDeviceMode);
         UI.addSettingChangeHandler('remote_scale');
         UI.addSettingChangeHandler('remote_scale', UI.applyResizeMode);
-        UI.addSettingChangeHandler('remote_scale', UI.updateViewClip);
         UI.addSettingChangeHandler('quality');
         UI.addSettingChangeHandler('quality', UI.updateQuality);
         UI.addSettingChangeHandler('compression');
         UI.addSettingChangeHandler('compression', UI.updateCompression);
         UI.addSettingChangeHandler('fast_mode');
         UI.addSettingChangeHandler('fast_mode', UI.updateFastMode);
+        UI.addSettingChangeHandler('fast_mode', UI.applyResizeMode);
+        UI.addSettingChangeHandler('low_bandwidth');
+        UI.addSettingChangeHandler('low_bandwidth', UI.updateFastMode);
+        UI.addSettingChangeHandler('low_bandwidth', UI.applyResizeMode);
         UI.addSettingChangeHandler('dynamic_quality');
         UI.addSettingChangeHandler('dynamic_quality', UI.updateDynamicQuality);
         UI.addSettingChangeHandler('view_clip');
@@ -1203,10 +1255,12 @@ const UI = {
         UI.updateSetting('resize');
         UI.updateSetting('remote_scale');
         UI.updateSetting('device_mode');
+        UI.updateSetting('phone_local_scale');
         UI.updateDeviceModeHint();
         UI.updateSetting('quality');
         UI.updateSetting('compression');
         UI.updateSetting('fast_mode');
+        UI.updateSetting('low_bandwidth');
         UI.updateSetting('dynamic_quality');
         UI.updateFastMode();
         UI.updateSetting('shared');
@@ -1226,6 +1280,7 @@ const UI = {
             .classList.add("noVNC_open");
         document.getElementById('noVNC_settings_button')
             .classList.add("noVNC_selected");
+        UI.updateLine();
     },
 
     closeSettingsPanel() {
@@ -1233,6 +1288,7 @@ const UI = {
             .classList.remove("noVNC_open");
         document.getElementById('noVNC_settings_button')
             .classList.remove("noVNC_selected");
+        clearTimeout(UI.lineTimer);
     },
 
     toggleSettingsPanel() {
@@ -1305,6 +1361,7 @@ const UI = {
             .classList.add("noVNC_open");
         document.getElementById('noVNC_clipboard_button')
             .classList.add("noVNC_selected");
+        if (!isTouchDevice) document.getElementById('noVNC_clipboard_text').focus();
     },
 
     closeClipboardPanel() {
@@ -1326,14 +1383,349 @@ const UI = {
     clipboardReceive(e) {
         Log.Debug(">> UI.clipboardReceive: " + e.detail.text.substr(0, 40) + "...");
         document.getElementById('noVNC_clipboard_text').value = e.detail.text;
+        // Plain HTTP pages have no automatic clipboard access
+        if (e.detail.text && !navigator.clipboard?.writeText) {
+            UI.showClipboardNotice(_('Text was copied on the remote computer.'), [{
+                label: _('Copy to local clipboard'),
+                action: UI.copyReceivedText,
+            }]);
+        }
         Log.Debug("<< UI.clipboardReceive");
     },
 
     clipboardSend() {
         const text = document.getElementById('noVNC_clipboard_text').value;
         Log.Debug(">> UI.clipboardSend: " + text.substr(0, 40) + "...");
-        UI.rfb.clipboardPasteFrom(text);
+        UI.rfb?.clipboardPasteFrom(text);
         Log.Debug("<< UI.clipboardSend");
+    },
+
+    copyReceivedText() {
+        const text = document.getElementById('noVNC_clipboard_text');
+        text.select();
+        const copied = document.execCommand('copy');
+        UI.showClipboardNotice(copied ? _('Copied to the local clipboard.') :
+            _('The browser blocked clipboard access.'));
+    },
+
+    showClipboardNotice(message, actions = []) {
+        clearTimeout(UI.clipboardNoticeTimer);
+        document.getElementById('noVNC_clipboard_notice_text').textContent = message;
+        const buttons = actions.map(({ label, action }) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.addEventListener('click', () => {
+                action();
+                if (!isTouchDevice) UI.focusKeyboard();
+            });
+            return button;
+        });
+        document.getElementById('noVNC_clipboard_notice_actions').replaceChildren(...buttons);
+        document.getElementById('noVNC_clipboard_notice').hidden = false;
+        if (!actions.length) UI.clipboardNoticeTimer = setTimeout(UI.hideClipboardNotice, 5000);
+    },
+
+    hideClipboardNotice() {
+        clearTimeout(UI.clipboardNoticeTimer);
+        document.getElementById('noVNC_clipboard_notice').hidden = true;
+    },
+
+    // Runs for as long as this connection lasts. Each request returns when
+    // the remote clipboard changes, or after a while without a change.
+    async watchRemoteClipboard() {
+        const revision = ++UI.clipboardWatchRevision;
+        let since = '';
+        let failures = 0;
+        while (revision === UI.clipboardWatchRevision) {
+            try {
+                const state = await UI.fileTransfer.watchClipboard(since);
+                if (revision !== UI.clipboardWatchRevision) return;
+                since = state.token;
+                failures = 0;
+                if (state.changed && !UI.rfb?.viewOnly) UI.remoteClipboardChanged(state);
+            } catch (err) {
+                const delay = Math.min(60000, 2000 * 2 ** failures++);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    },
+
+    canSyncLocalImage() {
+        return UI.canTransferClipboardFiles() && !!navigator.clipboard?.read &&
+               !!window.crypto?.subtle;
+    },
+
+    // The PNG on the local clipboard. Spreadsheets and word processors add
+    // a picture of copied text, so those selections stay text. Apps that
+    // copy a picture with a file name or placeholder as text stay images.
+    async readLocalImage() {
+        const items = await navigator.clipboard.read();
+        const item = items.find(entry => entry.types.includes('image/png'));
+        if (!item) return null;
+        const text = item.types.includes('text/plain') ?
+            await (await item.getType('text/plain')).text() : '';
+        if (item.types.includes('text/html') && text.replace(/[\s\uFFFC]/g, '')) return null;
+        // File managers can offer a copied file's icon along with its name
+        const fileIcon = /^[^\r\n/\\]+\.\w{1,10}$/.test(text.trim());
+        return { blob: await item.getType('image/png'), fileIcon };
+    },
+
+    async imageHash(blob) {
+        const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+        return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    // Resolves true when the local clipboard holds an image, so that it
+    // is not also sent as text. A paste key press may send an image copied
+    // before this page opened. Focus alone only sends newly copied images.
+    syncLocalImage(pasting = false) {
+        if (!UI.canSyncLocalImage()) return Promise.resolve(false);
+        if (UI.localImageSync) {
+            return UI.localImageSync.then(result => (pasting ? UI.syncLocalImage(true) : result));
+        }
+        const task = UI.publishLocalImage(pasting).catch((err) => {
+            Log.Warn("Local image sync failed: " + err);
+            return false;
+        }).finally(() => { UI.localImageSync = null; });
+        UI.localImageSync = task;
+        return task;
+    },
+
+    async publishLocalImage(pasting) {
+        const image = await UI.readLocalImage();
+        if (!image) {
+            UI.localImageBaseline ??= '';
+            return false;
+        }
+        // The paste event carries the real file when the key is pressed
+        if (image.fileIcon && !pasting) return true;
+        const { blob } = image;
+        const hash = await UI.imageHash(blob);
+        const first = UI.localImageBaseline === null;
+        if (first) UI.localImageBaseline = hash;
+        const stale = hash === UI.localImageBaseline &&
+                      (!pasting || UI.remoteCopiedSinceConnect);
+        if (hash === UI.localImagePublished || stale) return true;
+
+        UI.showClipboardNotice(_('Sending the local image to the remote computer…'));
+        try {
+            await UI.fileTransfer.sendClipboardImage(blob);
+            UI.localImagePublished = hash;
+            UI.localFilesPublished = null;
+            UI.showClipboardNotice(_('The local image is on the remote clipboard.'));
+        } catch (err) {
+            UI.showClipboardNotice(err.message, [{
+                label: _('Close'),
+                action: UI.hideClipboardNotice,
+            }]);
+        }
+        return true;
+    },
+
+    handlePasteKeyDown(e) {
+        if (e.code !== 'KeyV' || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+        const onDesktop = e.target?.id === 'noVNC_keyboardinput' ||
+                          e.target === document.querySelector('#noVNC_container canvas');
+        if (!onDesktop || !UI.canTransferClipboardFiles()) return;
+        // Only the browser's own paste action exposes copied files, so
+        // the default action of this key press has to go ahead.
+        e.stopImmediatePropagation();
+        UI.pasteKeyHeld = true;
+        UI.pasteModifierHeld = true;
+        if (e.repeat) {
+            e.preventDefault();
+            return;
+        }
+
+        const rfb = UI.rfb;
+        const keysym = e.shiftKey ? KeyTable.XK_V : KeyTable.XK_v;
+        UI.pendingPaste = () => {
+            if (UI.rfb !== rfb) return;
+            // A large transfer can outlast the key press
+            const press = !UI.pasteModifierHeld;
+            if (press) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', true);
+            rfb.sendKey(keysym, 'KeyV', true);
+            rfb.sendKey(keysym, 'KeyV', false);
+            if (press) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', false);
+        };
+        clearTimeout(UI.pendingPasteTimer);
+        UI.pendingPasteTimer = setTimeout(() => {
+            const paste = UI.pendingPaste;
+            UI.pendingPaste = null;
+            if (paste) UI.syncLocalImage(true).finally(paste);
+        }, 250);
+    },
+
+    handleDesktopPaste(e) {
+        const paste = UI.pendingPaste;
+        if (!paste) return;
+        UI.pendingPaste = null;
+        clearTimeout(UI.pendingPasteTimer);
+        e.preventDefault();
+        e.stopImmediatePropagation();
+
+        const { files, folders } = UI.pastedFiles(e.clipboardData);
+        if (files.length) {
+            UI.pasteLocalFiles(files, folders).then(sent => sent && paste());
+        } else if (folders) {
+            UI.showClipboardNotice(_('Folders cannot be pasted. Compress the folder first.'));
+        } else {
+            UI.syncLocalImage(true).finally(paste);
+        }
+    },
+
+    pastedFiles(data) {
+        const files = [];
+        let folders = 0;
+        for (const item of data?.items || []) {
+            if (item.kind !== 'file') continue;
+            if (item.webkitGetAsEntry?.()?.isDirectory) {
+                folders++;
+                continue;
+            }
+            const file = item.getAsFile();
+            if (file) files.push(file);
+        }
+        // Copied pixels arrive as a just-created file called image.png
+        const bitmap = files.length === 1 && files[0].name === 'image.png' &&
+                       Date.now() - files[0].lastModified < 5000;
+        return { files: bitmap && UI.canSyncLocalImage() ? [] : files, folders };
+    },
+
+    async pasteLocalFiles(files, folders) {
+        const key = files.map(file => [file.name, file.size, file.lastModified].join('|')).join('\n');
+        if (key === UI.localFilesPublished) return true;
+        if (UI.fileTransfer.busy) {
+            UI.showClipboardNotice(_('Another file transfer is still running.'));
+            return false;
+        }
+        // On failure the file panel stays open and shows the reason
+        if (!await UI.clipboardUpload(files)) return false;
+        UI.localFilesPublished = key;
+        UI.localImagePublished = null;
+        UI.closeFilesPanel();
+        UI.focusKeyboard();
+        UI.showClipboardNotice(folders ?
+            _('Files sent. Folders were skipped, compress them first.') :
+            _('The local files are on the remote clipboard.'));
+        return true;
+    },
+
+    // File managers also offer copied files as text paths. Wait to learn
+    // what was copied, so that the paths do not replace the local clipboard.
+    holdRemotePaths(text) {
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        if (!lines.length || !lines.every(line => line.startsWith('/'))) return null;
+        if (Date.now() - UI.remoteFilesAt < 3000) return Promise.resolve(false);
+        return new Promise((resolve) => {
+            UI.remotePathHold?.(true);
+            const timer = setTimeout(() => UI.remotePathHold?.(true), 2500);
+            UI.remotePathHold = (allowed) => {
+                clearTimeout(timer);
+                UI.remotePathHold = null;
+                resolve(allowed);
+            };
+        });
+    },
+
+    handlePasteKeyUp(e) {
+        if (['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'].includes(e.code)) {
+            UI.pasteModifierHeld = false;
+        }
+        if (e.code === 'KeyV' && UI.pasteKeyHeld) {
+            UI.pasteKeyHeld = false;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        }
+    },
+
+    remoteClipboardChanged(state) {
+        // Selections published from this page need no announcement
+        if (state.kind === 'none') return;
+        UI.remoteCopiedSinceConnect = true;
+        if (state.kind === 'files') UI.remoteFilesAt = Date.now();
+        UI.remotePathHold?.(state.kind !== 'files');
+        if (state.kind === 'image') UI.receiveRemoteImage();
+        else if (state.kind === 'files') UI.receiveRemoteFiles(state);
+        else if (navigator.clipboard?.writeText) UI.hideClipboardNotice();
+    },
+
+    async copyRemoteImage() {
+        // Safari needs the write to start before the image has arrived
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': UI.fileTransfer.clipboardImage() })
+        ]);
+        UI.showClipboardNotice(_('The remote image is on the local clipboard.'));
+        // Browsers re-encode images. Remember the result so that it is not
+        // mistaken for a new local copy and sent back.
+        const copied = await UI.readLocalImage().catch(() => null);
+        if (copied) UI.localImagePublished = await UI.imageHash(copied.blob);
+    },
+
+    async receiveRemoteImage() {
+        const save = { label: _('Download'), action: () => UI.fileTransfer.saveClipboardImage() };
+        const message = _('An image was copied on the remote computer.');
+        if (!navigator.clipboard?.write || !window.ClipboardItem) {
+            UI.showClipboardNotice(message, [save]);
+            return;
+        }
+        const copy = {
+            label: _('Copy to local clipboard'),
+            action: () => UI.copyRemoteImage().catch(() => {
+                UI.showClipboardNotice(_('The browser blocked clipboard access.'), [save]);
+            }),
+        };
+        try {
+            await UI.copyRemoteImage();
+        } catch (err) {
+            // Usually the page lacks focus. A click grants the access.
+            UI.showClipboardNotice(message, [copy, save]);
+        }
+    },
+
+    receiveRemoteFiles({ files, skipped }) {
+        if (!files.length) {
+            UI.showClipboardNotice(_('The copied items cannot be read on the remote computer.'),
+                                   [{ label: _('Close'), action: UI.hideClipboardNotice }]);
+            return;
+        }
+        const total = files.reduce((sum, file) => sum + file.size, 0);
+        let message = files.length === 1 ? files[0].name :
+            _('%s files were copied on the remote computer.').replace('%s', files.length);
+        // The size of a folder is only known once it has been packed
+        if (!files.some(file => file.folder)) message += ' · ' + sizeLabel(total);
+        if (skipped) message += ' · ' + _('Some clipboard items could not be downloaded.');
+        UI.showClipboardNotice(message, [{
+            label: _('Download'),
+            action: () => {
+                UI.hideClipboardNotice();
+                UI.fileTransfer.saveClipboardFiles(files);
+            },
+        }]);
+    },
+
+    canTransferClipboardFiles() {
+        return UI.connected && UI.sameOriginConnection && UI.rfb?.viewOnly === false;
+    },
+
+    // Resolves true once the files are on the remote clipboard
+    async clipboardUpload(files) {
+        if (!UI.canTransferClipboardFiles() || !files.length) return false;
+        UI.openFilesPanel(false);
+        const rfb = UI.rfb;
+        let published = false;
+        await UI.fileTransfer.upload(files, {
+            onUploaded: async (paths) => {
+                if (UI.rfb !== rfb || !UI.canTransferClipboardFiles()) {
+                    throw new Error(_('The remote connection changed. The uploaded files are in the transfer folder.'));
+                }
+                rfb.preserveClipboardOnFocus();
+                await UI.fileTransfer.copyToClipboard(paths);
+                published = true;
+            },
+        });
+        return published;
     },
 
     addFileTransferHandlers() {
@@ -1423,7 +1815,7 @@ const UI = {
             .classList.remove("noVNC_open");
     },
 
-    connect(event, password, routeAttempt) {
+    connect(event, password, alternateURL = null) {
 
         // Ignore when rfb already exists
         if (typeof UI.rfb !== 'undefined') {
@@ -1453,7 +1845,9 @@ const UI = {
 
         let url;
 
-        if (host) {
+        if (alternateURL) {
+            url = alternateURL;
+        } else if (host) {
             url = new URL("https://" + host);
 
             url.protocol = UI.getSetting('encrypt') ? 'wss:' : 'ws:';
@@ -1473,18 +1867,22 @@ const UI = {
             url = new URL(path, location.href);
             url.protocol = (window.location.protocol === "https:") ? 'wss:' : 'ws:';
         }
-        UI.sameOriginConnection = url.host === window.location.host &&
-            url.pathname === new URL('websockify', window.location.href).pathname;
 
-        // Our gateway turns a connection away while it arrives over a
-        // slow line and there are attempts left, and reports on the line
-        UI.routeAttempt = routeAttempt || 1;
-        UI.routePassword = password;
+        if (!alternateURL) {
+            UI.connectionStartedAt = performance.now();
+            UI.firstFrameMs = null;
+        }
+        UI.fallbackURL = alternateURL ? null : UI.getFallbackURL(url);
+        UI.connectionTimedOut = false;
+        UI.encryptedConnection = url.protocol === 'wss:';
+        UI.sameOriginConnection = url.host === window.location.host &&
+            url.protocol === (window.location.protocol === 'https:' ? 'wss:' : 'ws:') &&
+            (alternateURL !== null || url.pathname === new URL('websockify', window.location.href).pathname);
+
         UI.lineId = null;
         if (UI.sameOriginConnection) {
             UI.lineId = Array.from(window.crypto.getRandomValues(new Uint8Array(8)),
                                    b => b.toString(16).padStart(2, '0')).join('');
-            url.searchParams.set('route', UI.routeAttempt);
             url.searchParams.set('line', UI.lineId);
         }
 
@@ -1500,12 +1898,12 @@ const UI = {
                                credentials: { password: password } });
         } catch (exc) {
             Log.Error("Failed to connect to server: " + exc);
-            UI.updateVisualState('disconnected');
-            UI.showStatus(_("Failed to connect to server: ") + exc, 'error');
+            UI.disconnectFinished({ detail: { clean: false } });
             return;
         }
 
         UI.rfb.addEventListener("connect", UI.connectFinished);
+        UI.rfb.addEventListener("firstframe", UI.firstFrame);
         UI.rfb.addEventListener("disconnect", UI.disconnectFinished);
         UI.rfb.addEventListener("serververification", UI.serverVerify);
         UI.rfb.addEventListener("credentialsrequired", UI.credentials);
@@ -1517,9 +1915,7 @@ const UI = {
         UI.rfb.addEventListener("desktopname", UI.updateDesktopName);
         UI.rfb.clipViewport = UI.getSetting('view_clip');
         UI.applyDeviceMode();
-        UI.rfb.qualityLevel = parseInt(UI.getSetting('quality'));
-        UI.rfb.compressionLevel = parseInt(UI.getSetting('compression'));
-        UI.rfb.fastMode = UI.getSetting('fast_mode');
+        UI.updateFastMode();
         UI.rfb.dynamicQuality = UI.getSetting('dynamic_quality');
         UI.rfb.showDotCursor = UI.getSetting('show_dot');
         UI.updateMacShortcuts();
@@ -1528,33 +1924,62 @@ const UI = {
 
         UI.updateViewOnly(); // requires UI.rfb
         UI.updateClipboard();
+
+        if (UI.fallbackURL || alternateURL) {
+            UI.connectionTimeout = setTimeout(() => {
+                UI.connectionTimedOut = true;
+                UI.rfb.disconnect();
+            }, FALLBACK_TIMEOUT);
+        }
+    },
+
+    getFallbackURL(primary) {
+        // A deployment can opt into a second WebSocket endpoint for the same
+        // session. Only use the operator's config, never a query parameter.
+        const configured = UI.customSettings.mandatory.fallback_url ??
+            UI.customSettings.defaults.fallback_url;
+        if (!configured) return null;
+        try {
+            const alternate = new URL(configured, primary);
+            if (alternate.protocol === primary.protocol && !alternate.username &&
+                !alternate.password && !alternate.hash && alternate.href !== primary.href) {
+                return alternate;
+            }
+        } catch (err) {
+            Log.Warn("Invalid fallback WebSocket URL: " + err);
+        }
+        return null;
+    },
+
+    stopConnectionFallback() {
+        clearTimeout(UI.connectionTimeout);
+        UI.connectionTimeout = null;
+        UI.fallbackURL = null;
     },
 
     disconnect() {
-        UI.rfb.disconnect();
-
-        UI.connected = false;
-
-        // Disable automatic reconnecting
         UI.inhibitReconnect = true;
-
+        UI.stopConnectionFallback();
+        UI.connected = false;
         UI.updateVisualState('disconnecting');
-
-        // Don't display the connection settings until we're actually disconnected
+        UI.rfb.disconnect();
     },
 
     reconnect() {
         UI.reconnectCallback = null;
 
         // if reconnect has been disabled in the meantime, do nothing.
-        if (UI.inhibitReconnect) {
+        if (UI.inhibitReconnect || !UI.getSetting('reconnect')) {
+            UI.cancelReconnect();
             return;
         }
 
-        UI.connect(null, UI.reconnectPassword);
+        UI.connect(null, UI.reconnectPassword ?? null);
     },
 
     cancelReconnect() {
+        UI.inhibitReconnect = true;
+        UI.reconnectAttempts = 0;
         if (UI.reconnectCallback !== null) {
             clearTimeout(UI.reconnectCallback);
             UI.reconnectCallback = null;
@@ -1567,12 +1992,15 @@ const UI = {
     },
 
     connectFinished(e) {
+        UI.stopConnectionFallback();
         UI.connected = true;
-        UI.updateLine();
         UI.inhibitReconnect = false;
+        UI.reconnectAttempts = 0;
+        UI.updateLine();
+        UI.fitRemoteWindows();
 
         let msg;
-        if (UI.getSetting('encrypt')) {
+        if (UI.encryptedConnection) {
             msg = _("Connected (encrypted) to ") + UI.desktopName;
         } else {
             msg = _("Connected (unencrypted) to ") + UI.desktopName;
@@ -1585,6 +2013,12 @@ const UI = {
 
         // Do this last because it can only be used on rendered elements
         UI.updateImeInput();
+        UI.localImageBaseline = null;
+        UI.remoteCopiedSinceConnect = false;
+        UI.localFilesPublished = null;
+        UI.rfb.beforeClipboardSync = () => UI.syncLocalImage();
+        if (UI.sameOriginConnection) UI.rfb.clipboardWriteHold = UI.holdRemotePaths;
+        if (UI.sameOriginConnection) UI.watchRemoteClipboard();
         const password = UI.rememberPendingPassword;
         UI.rememberPendingPassword = null;
         if (password !== null) {
@@ -1592,6 +2026,11 @@ const UI = {
                 UI.showStatus(_("Connected, but browser login could not be remembered."), 'warning');
             });
         }
+    },
+
+    firstFrame() {
+        UI.firstFrameMs = Math.round(performance.now() - UI.connectionStartedAt);
+        UI.updateLine();
     },
 
     disconnectFinished(e) {
@@ -1602,6 +2041,10 @@ const UI = {
         // the server, we need to do it here as well since
         // UI.disconnect() won't be used in those cases.
         UI.connected = false;
+        UI.clipboardWatchRevision++;
+        UI.hideClipboardNotice();
+        const alternateURL = UI.fallbackURL;
+        UI.stopConnectionFallback();
 
         UI.rfb = undefined;
         UI.rememberPendingPassword = null;
@@ -1618,17 +2061,14 @@ const UI = {
         UI.wakeLockManager.release();
         UI.updateLine();
 
-        // The line was slow: another attempt may get a better one
-        if (!wasConnected && e.detail.code === SLOW_ROUTE_CLOSE) {
-            UI.connect(null, UI.routePassword === undefined ? null : UI.routePassword,
-                       UI.routeAttempt + 1);
-            UI.showStatus(_("Looking for a faster line...") + " (" + UI.routeAttempt + ")",
-                          'normal');
+        if (alternateURL) {
+            UI.connect(null, UI.reconnectPassword ?? null, alternateURL);
+            UI.showStatus(_("Connecting through the backup endpoint…"));
             return;
         }
 
-        if (!e.detail.clean) {
-            UI.updateVisualState('disconnected');
+        const failed = UI.connectionTimedOut || !e.detail.clean;
+        if (failed) {
             if (wasConnected) {
                 UI.showStatus(_("Something went wrong, connection is closed"),
                               'error');
@@ -1640,14 +2080,18 @@ const UI = {
         if (UI.getSetting('reconnect', false) === true && !UI.inhibitReconnect) {
             UI.updateVisualState('reconnecting');
 
-            const delay = parseInt(UI.getSetting('reconnect_delay'));
+            const configured = Number(UI.getSetting('reconnect_delay'));
+            const initial = Number.isFinite(configured) && configured > 0 ?
+                Math.min(Math.max(250, configured), 2147483647) : RECONNECT_DELAY;
+            const delay = Math.min(initial * 2 ** UI.reconnectAttempts,
+                                   Math.max(initial, MAX_RECONNECT_DELAY));
+            UI.reconnectAttempts++;
             UI.reconnectCallback = setTimeout(UI.reconnect, delay);
             return;
-        } else {
-            UI.updateVisualState('disconnected');
-            UI.showStatus(_("Disconnected"), 'normal');
         }
 
+        UI.updateVisualState('disconnected');
+        if (!failed) UI.showStatus(_("Disconnected"), 'normal');
         UI.updateBeforeUnload();
 
         document.title = PAGE_TITLE;
@@ -1657,6 +2101,10 @@ const UI = {
     },
 
     securityFailed(e) {
+        UI.stopConnectionFallback();
+        UI.inhibitReconnect = true;
+        UI.reconnectAttempts = 0;
+        UI.reconnectPassword = null;
         let msg;
         // On security failures we might get a string with a reason
         // directly from the server. Note that we can't control if
@@ -1695,6 +2143,7 @@ const UI = {
  * ------v------*/
 
     async serverVerify(e) {
+        UI.stopConnectionFallback();
         const type = e.detail.type;
         if (type === 'RSA') {
             const publickey = e.detail.publickey;
@@ -1726,6 +2175,7 @@ const UI = {
  * ------v------*/
 
     async credentials(e) {
+        UI.stopConnectionFallback();
         const rfb = UI.rfb;
         if (UI.sameOriginConnection && e.detail.challenge) {
             // The gateway answers the challenge using the HttpOnly cookie.
@@ -1870,6 +2320,7 @@ const UI = {
     },
 
     resizeMode() {
+        if (UI.phoneMode() && UI.getSetting('phone_local_scale')) return 'scale';
         return UI.getSetting('resize');
     },
 
@@ -1885,7 +2336,6 @@ const UI = {
         if (!UI.rfb) return;
 
         UI.applyResizeMode();
-        UI.updateViewClip();
         UI.rfb.localPinchZoom = phone || isTouchDevice;
         UI.fitRemoteWindows();
     },
@@ -1904,8 +2354,12 @@ const UI = {
     fitRemoteWindows() {
         clearTimeout(UI.fitWindowsTimer);
         UI.fitWindowsTimer = setTimeout(() => {
-            if (!UI.connected) return;
-            BrowserSession.fitWindows(UI.phoneDesktop() ? 'fit' : 'restore').catch(() => {});
+            if (!UI.connected || !UI.sameOriginConnection || UI.rfb.viewOnly) return;
+            const fit = UI.phoneDesktop();
+            if (!fit && UI.phoneMode() && UI.getSetting('phone_local_scale') &&
+                !UI.phoneWindowsFitted) return;
+            UI.phoneWindowsFitted = fit;
+            BrowserSession.fitWindows(fit ? 'fit' : 'restore').catch(() => {});
         }, 1500);
     },
 
@@ -1913,11 +2367,22 @@ const UI = {
     applyResizeMode() {
         if (!UI.rfb) return;
 
-        UI.rfb.resizeTolerance = UI.phoneDesktop() ? 0.1 : 0;
-        UI.rfb.remoteResizeScale = UI.remoteScale();
+        const phoneLocal = UI.phoneMode() && UI.getSetting('phone_local_scale');
+        const weakNetwork = UI.lowBandwidthMode();
+        let fixedSize = phoneLocal ? null : UI.defaultDesktopSize();
+        if (weakNetwork && !phoneLocal &&
+            (!fixedSize || fixedSize.w > LOW_BANDWIDTH_SIZE.w || fixedSize.h > LOW_BANDWIDTH_SIZE.h)) {
+            fixedSize = LOW_BANDWIDTH_SIZE;
+        }
         UI.rfb.scaleViewport = UI.viewportScaled();
-        UI.rfb.resizeSession = UI.resizeMode() === 'remote';
-        UI.rfb.fixedDesktopSize = UI.defaultDesktopSize();
+        UI.rfb.setDesktopResize({
+            remote: UI.resizeMode() === 'remote',
+            scale: UI.remoteScale(),
+            tolerance: UI.phoneDesktop() ? 0.1 : 0,
+            fixedSize,
+            maximum: weakNetwork ? LOW_BANDWIDTH_SIZE : null,
+        });
+        UI.updateViewClip();
     },
 
     // How much larger than the browser the remote desktop is made
@@ -1940,7 +2405,7 @@ const UI = {
     viewportScaled() {
         const mode = UI.resizeMode();
         // Phone mode always fits the view, which is what pinching zooms
-        return mode === 'scale' || UI.phoneMode() ||
+        return mode === 'scale' || UI.phoneMode() || UI.lowBandwidthMode() ||
                (mode === 'remote' && (isTouchDevice || UI.remoteScale() !== 1));
     },
 
@@ -2046,14 +2511,27 @@ const UI = {
 
     updateFastMode() {
         const enabled = UI.getSetting('fast_mode');
+        const lowBandwidth = UI.lowBandwidthMode();
+        if (enabled || 'low_bandwidth' in UI.customSettings.mandatory) UI.disableSetting('low_bandwidth');
+        else UI.enableSetting('low_bandwidth');
+        if (lowBandwidth || 'fast_mode' in UI.customSettings.mandatory) UI.disableSetting('fast_mode');
+        else UI.enableSetting('fast_mode');
         for (const name of ['quality', 'compression']) {
-            if (enabled || name in UI.customSettings.mandatory) {
+            if (enabled || lowBandwidth || name in UI.customSettings.mandatory) {
                 UI.disableSetting(name);
             } else {
                 UI.enableSetting(name);
             }
         }
-        if (UI.rfb) UI.rfb.fastMode = enabled;
+        if (UI.rfb) {
+            UI.rfb.fastMode = enabled;
+            UI.updateQuality();
+            UI.updateCompression();
+        }
+    },
+
+    lowBandwidthMode() {
+        return UI.getSetting('low_bandwidth') && !UI.getSetting('fast_mode');
     },
 
     updateDynamicQuality() {
@@ -2064,7 +2542,7 @@ const UI = {
     updateQuality() {
         if (!UI.rfb) return;
 
-        UI.rfb.qualityLevel = parseInt(UI.getSetting('quality'));
+        UI.rfb.qualityLevel = UI.lowBandwidthMode() ? 3 : parseInt(UI.getSetting('quality'));
     },
 
 /* ------^-------
@@ -2076,7 +2554,7 @@ const UI = {
     updateCompression() {
         if (!UI.rfb) return;
 
-        UI.rfb.compressionLevel = parseInt(UI.getSetting('compression'));
+        UI.rfb.compressionLevel = UI.lowBandwidthMode() ? 2 : parseInt(UI.getSetting('compression'));
     },
 
 /* ------^-------
@@ -2159,10 +2637,10 @@ const UI = {
                 case 'textarea':
                 case 'select-one':
                 case 'select-multiple':
+                case 'range':
                 // Sliders are dragged with the mouse; cancelling mousedown
                 // would make them impossible to move while the local input
                 // method keeps the focus on the keyboardinput element.
-                case 'range':
                     return;
             }
         }
@@ -2393,35 +2871,34 @@ const UI = {
     async updateLine() {
         clearTimeout(UI.lineTimer);
         const hint = document.getElementById('noVNC_line_hint');
-        if (!UI.connected || !UI.lineId) {
-            hint.textContent = "";
+        document.getElementById('noVNC_first_frame_hint').textContent =
+            UI.connected && UI.firstFrameMs !== null ?
+                _("Time to first frame: %s ms").replace('%s', UI.firstFrameMs) : '';
+        if (!UI.connected || !UI.lineId ||
+            !document.getElementById('noVNC_settings').classList.contains('noVNC_open')) {
+            hint.textContent = '';
             return;
         }
         const id = UI.lineId;
-        if (document.getElementById('noVNC_settings').classList.contains('noVNC_open')) {
-            let text = "";
-            try {
-                const response = await fetch(new URL('api/files/line?id=' + id, window.location.href),
-                                             { cache: 'no-store' });
-                if (response.ok) {
-                    const line = await response.json();
-                    text = _("Line: ") + line.node;
-                    if (line.rtt !== undefined) text += " · " + line.rtt + " ms";
-                    if (line.sent > 0) {
-                        text += " · " + _("resent") + " " +
-                                (line.resent / line.sent * 100).toFixed(1) + "%";
-                    }
-                    if (line.attempt > 1) {
-                        text += " · " + _("tried") + " " + line.attempt + " " +
-                                (line.slow ? _("nodes, all slow") : _("nodes"));
-                    }
+        let text = '';
+        try {
+            const response = await fetch(new URL('api/files/line?id=' + id, window.location.href),
+                                         { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+            if (response.ok) {
+                const line = await response.json();
+                text = _("Line: ") + line.node;
+                if (line.rtt > 0) {
+                    text += " · " + _("Gateway-side RTT: %s ms").replace('%s', line.rtt);
                 }
-            } catch (err) {
-                // Leave the hint empty
+                if (line.sent > 0) {
+                    text += " · " + _("resent") + " " +
+                            (line.resent / line.sent * 100).toFixed(1) + "%";
+                }
             }
-            if (id !== UI.lineId || !UI.connected) return;
-            hint.textContent = text;
-        }
+        } catch { /* Refresh on the next poll. */ }
+        if (id !== UI.lineId || !UI.connected ||
+            !document.getElementById('noVNC_settings').classList.contains('noVNC_open')) return;
+        hint.textContent = text;
         clearTimeout(UI.lineTimer);
         UI.lineTimer = setTimeout(UI.updateLine, 3000);
     },
@@ -2457,6 +2934,7 @@ const UI = {
         const rfb = UI.rfb;
         const revision = UI.textInputRevision;
         if (await browserAsyncClipboardSupport() !== 'available') return;
+        if (await UI.syncLocalImage()) return;
 
         let text;
         try {
@@ -2469,7 +2947,7 @@ const UI = {
         // text that is still being pasted, or sync into a new connection.
         if (UI.rfb === rfb && revision === UI.textInputRevision &&
             UI.pacedKeysTimer === null && UI.pacedTextPending === null) {
-            rfb.clipboardPasteFrom(text);
+            rfb.syncClipboardText(text);
         }
     },
 
@@ -2673,6 +3151,8 @@ const UI = {
         // clipboard sync can coexist with it and does not replace its controls.
         document.getElementById('noVNC_clipboard_button')
             .classList.toggle('noVNC_hidden', UI.rfb.viewOnly);
+        document.getElementById('noVNC_clipboard_files')
+            .classList.toggle('noVNC_hidden', !UI.sameOriginConnection);
     },
 
     updateShowDotCursor() {

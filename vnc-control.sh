@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/novnc-vnc"
 VNC_DISPLAY="${VNC_DISPLAY:-:1}"
 VNC_PORT="${VNC_PORT:-5901}"
+VNC_LOCALHOST="${VNC_LOCALHOST:-yes}"
 NOVNC_PORT="${NOVNC_PORT:-6990}"
 NOVNC_FILES_DIR="${NOVNC_FILES_DIR:-${HOME}/Downloads/noVNC}"
 VNC_PASSWORD_FILE="${VNC_PASSWORD_FILE:-${HOME}/.vnc/passwd}"
@@ -27,6 +28,7 @@ Usage: $(basename "$0") {start|stop|restart|status|on|off|web-start|web-stop|web
 Environment variables:
   VNC_GEOMETRY=1920x1080  TigerVNC desktop geometry (default 1920x1080)
   VNC_PORT=5901           VNC port
+  VNC_LOCALHOST=yes      Bind native VNC to loopback (set no for direct clients)
   NOVNC_PORT=6990         noVNC/WebSocket port
   NOVNC_FILES_DIR=~/Downloads/noVNC  Remote file transfer folder
   VNC_PASSWORD_FILE=~/.vnc/passwd   VNC password file for transfers
@@ -45,7 +47,12 @@ require_commands() {
 }
 
 port_is_listening() {
-    ss -H -ltn "sport = :$1" 2>/dev/null | grep -q .
+    local result
+    if ! result="$(LC_ALL=C ss -H -ltn "sport = :$1" 2>&1)" ||
+        [[ -n "${result}" && "${result}" != LISTEN[[:blank:]]* ]]; then
+        die "Unable to inspect TCP listeners on port $1: ${result:-ss failed}"
+    fi
+    [[ -n "${result}" ]]
 }
 
 wait_for_port() {
@@ -91,6 +98,8 @@ novnc_pid() {
 }
 
 start_vnc() {
+    [[ "${VNC_LOCALHOST}" == yes || "${VNC_LOCALHOST}" == no ]] ||
+        die "VNC_LOCALHOST must be yes or no"
     if port_is_listening "${VNC_PORT}"; then
         echo "VNC is already listening on port ${VNC_PORT}."
         return 0
@@ -104,7 +113,7 @@ start_vnc() {
     echo "Starting TigerVNC ${VNC_DISPLAY} (port ${VNC_PORT}, geometry ${VNC_GEOMETRY:-server default})..."
     if ! tigervncserver "${VNC_DISPLAY}" \
         -rfbport "${VNC_PORT}" \
-        -localhost no \
+        -localhost "${VNC_LOCALHOST}" \
         -SecurityTypes VncAuth \
         "${geometry_args[@]}" \
         -depth 24 \
@@ -174,6 +183,10 @@ start_all() {
 }
 
 stop_novnc() {
+    local listening=no
+    if port_is_listening "${NOVNC_PORT}"; then
+        listening=yes
+    fi
     if novnc_pid; then
         local pid
         pid="$(<"${NOVNC_PID_FILE}")"
@@ -183,15 +196,15 @@ stop_novnc() {
             kill -0 "${pid}" 2>/dev/null || break
             sleep 0.25
         done
-    elif port_is_listening "${NOVNC_PORT}"; then
+    elif [[ "${listening}" == yes ]]; then
         echo "Cannot safely stop noVNC: port ${NOVNC_PORT} is not owned by the recorded process." >&2
         return 1
     fi
-    rm -f "${NOVNC_PID_FILE}"
     wait_for_port_to_close "${NOVNC_PORT}" || {
         echo "Port ${NOVNC_PORT} is still listening." >&2
         return 1
     }
+    rm -f "${NOVNC_PID_FILE}"
     echo "noVNC stopped."
 }
 

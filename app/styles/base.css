@@ -1163,6 +1163,7 @@ html {
 
 /* Extra keys above the on-screen keyboard */
 #noVNC_device_mode_hint,
+#noVNC_first_frame_hint,
 #noVNC_line_hint {
     margin-top: 4px;
     font-size: 12px;
@@ -1207,6 +1208,41 @@ html {
 }
 
 /* File transfers */
+#noVNC_clipboard_notice {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    z-index: 101;
+    transform: translateX(-50%);
+    box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    width: max-content;
+    max-width: calc(100vw - 32px);
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: #fff;
+    color: #222;
+    font-size: 14px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+#noVNC_clipboard_notice[hidden] {
+    display: none;
+}
+#noVNC_clipboard_notice_text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+#noVNC_clipboard_notice_actions {
+    display: flex;
+    gap: 8px;
+}
+#noVNC_clipboard_notice button {
+    min-height: 32px;
+    cursor: pointer;
+}
 #noVNC_drop_overlay {
     display: none;
     position: fixed;
@@ -1230,6 +1266,10 @@ html {
 }
 #noVNC_files {
     width: 480px;
+}
+#noVNC_clipboard_files.noVNC_hidden,
+#noVNC_files .noVNC_hidden {
+    display: none;
 }
 #noVNC_files_root,
 #noVNC_files_path,
@@ -1255,7 +1295,7 @@ html {
 .noVNC_files_navigation code {
     min-width: 0;
 }
-#noVNC_files button {
+:is(#noVNC_files, #noVNC_clipboard_files) button {
     flex-shrink: 0;
     min-height: 36px;
     cursor: pointer;
@@ -1263,7 +1303,7 @@ html {
 #noVNC_files button:disabled {
     cursor: default;
 }
-#noVNC_files .noVNC_files_upload {
+:is(#noVNC_files, #noVNC_clipboard) .noVNC_files_upload {
     position: relative;
     overflow: hidden;
     display: inline-flex;
@@ -1280,7 +1320,7 @@ html {
     outline: 2px solid #555;
     outline-offset: 2px;
 }
-#noVNC_files_input {
+.noVNC_files_upload input[type=file] {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -1310,6 +1350,17 @@ html {
     margin: 0;
     padding: 8px 0;
     border-bottom: 1px solid #eee;
+}
+#noVNC_files_clipboard_list {
+    overflow-wrap: anywhere;
+    max-height: 180px;
+    overflow: auto;
+}
+#noVNC_files_clipboard_list:empty {
+    display: none;
+}
+#noVNC_clipboard_files .noVNC_files_actions {
+    flex-wrap: wrap;
 }
 .noVNC_files_name {
     flex: 1;
