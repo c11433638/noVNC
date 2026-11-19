@@ -253,8 +253,7 @@ const UI = {
         UI.initSetting('shared', true);
         UI.initSetting('bell', 'on');
         UI.initSetting('view_only', false);
-        // Touch devices already type through the on-screen keyboard field
-        UI.initSetting('ime_input', !isTouchDevice);
+        UI.initSetting('ime_input', true);
         UI.initSetting('ime_clipboard', false);
         UI.initSetting('mac_shortcuts', isMac() || isIOS());
         // Fingers are too coarse to point with on a phone or tablet
