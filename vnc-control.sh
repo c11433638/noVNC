@@ -4,7 +4,8 @@ set -u
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/novnc-vnc"
-VNC_DISPLAY="${VNC_DISPLAY:-:1}"
+CONFIGURED_VNC_DISPLAY="${VNC_DISPLAY:-}"
+VNC_DISPLAY="${CONFIGURED_VNC_DISPLAY:-:1}"
 VNC_PORT="${VNC_PORT:-5901}"
 VNC_LOCALHOST="${VNC_LOCALHOST:-yes}"
 NOVNC_PORT="${NOVNC_PORT:-6990}"
@@ -27,6 +28,7 @@ Usage: $(basename "$0") {start|stop|restart|status|on|off|web-start|web-stop|web
 
 Environment variables:
   VNC_GEOMETRY=1920x1080  TigerVNC desktop geometry (default 1920x1080)
+  VNC_DISPLAY=:1         X11 display for TigerVNC and the clipboard gateway
   VNC_PORT=5901           VNC port
   VNC_LOCALHOST=yes      Bind native VNC to loopback (set no for direct clients)
   NOVNC_PORT=6990         noVNC/WebSocket port
@@ -115,6 +117,7 @@ start_vnc() {
         -rfbport "${VNC_PORT}" \
         -localhost "${VNC_LOCALHOST}" \
         -SecurityTypes VncAuth \
+        -PasswordFile "${VNC_PASSWORD_FILE}" \
         "${geometry_args[@]}" \
         -depth 24 \
         -FrameRate 60 \
@@ -141,12 +144,26 @@ start_novnc() {
         die "Port ${NOVNC_PORT} is already in use by another process."
     fi
 
+    local input_display="${CONFIGURED_VNC_DISPLAY}"
+    if [[ -z "${input_display}" ]]; then
+        input_display="$(tigervncserver -list 2>/dev/null |
+            awk -v port="${VNC_PORT}" '$1 ~ /^:?[0-9]+$/ && $2 == port {
+                sub(/^:/, "", $1); print ":" $1; exit
+            }')"
+    fi
+    input_display="${input_display:-${1:-}}"
+    local display_args=()
+    if [[ -n "${input_display}" ]]; then
+        display_args=(--input-display "${input_display}")
+    fi
+
     echo "Starting noVNC (port ${NOVNC_PORT} -> 127.0.0.1:${VNC_PORT})..."
     rm -f "${NOVNC_PID_FILE}"
     if ! python3 "${ROOT_DIR}/utils/novnc_gateway.py" \
         --daemon \
         --web "${ROOT_DIR}" \
         --files "${NOVNC_FILES_DIR}" \
+        "${display_args[@]}" \
         --password-file "${VNC_PASSWORD_FILE}" \
         --log-file "${NOVNC_LOG}" \
         --port "${NOVNC_PORT}" --target-port "${VNC_PORT}" >/dev/null 2>&1; then
@@ -177,7 +194,7 @@ start_all() {
     require_commands
     mkdir -p "${STATE_DIR}"
     start_vnc
-    start_novnc
+    start_novnc "${VNC_DISPLAY}"
     echo
     echo "URL: http://$(hostname):${NOVNC_PORT}/vnc.html"
 }

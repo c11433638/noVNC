@@ -52,8 +52,8 @@ def desktop_selection(display, uris=None, image=None, media_type="image/png"):
         owner.kill()
         owner.wait()
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ClipboardUnavailable from exc
-    raise ClipboardUnavailable
+        raise ClipboardUnavailable(str(exc)) from exc
+    raise ClipboardUnavailable("Clipboard helper could not claim the X11 selection")
 
 
 def clipboard_state(display, since=""):
@@ -74,7 +74,7 @@ def run_helper(display, command, timeout):
                               env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               check=True, timeout=timeout).stdout
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        raise ClipboardUnavailable from exc
+        raise ClipboardUnavailable(str(exc)) from exc
 
 
 class Target(C.Structure):
@@ -96,7 +96,7 @@ class X11Clipboard:
         self.atom = self.bind(gdk.gdk_atom_intern, C.c_void_p, C.c_char_p, C.c_int)
         init = self.bind(gtk.gtk_init_check, C.c_int, C.c_void_p, C.c_void_p)
         if not init(None, None):
-            raise ClipboardUnavailable
+            raise ClipboardUnavailable("Could not open the X11 display")
         get_clipboard = self.bind(gtk.gtk_clipboard_get, C.c_void_p, C.c_void_p)
         self.clipboard = get_clipboard(self.atom(b"CLIPBOARD", 0))
         self.get_contents = self.bind(gtk.gtk_clipboard_wait_for_contents,

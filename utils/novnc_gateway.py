@@ -801,10 +801,14 @@ class FileRequestHandler(ProxyRequestHandler):
     def desktop_clipboard(self, function, *args):
         display = getattr(self.server, "text_input_display", None)
         if not display:
+            logging.warning("Clipboard access requires a local X11 display. Set --input-display.")
             raise APIError(501, "clipboard_unavailable")
         try:
             return function(display, *args)
-        except ClipboardUnavailable:
+        except ClipboardUnavailable as exc:
+            logging.warning("Clipboard access failed on X11 display %s. "
+                            "Check the GTK 3 runtime and X11 access for the gateway account: %s",
+                            display, exc)
             raise APIError(501, "clipboard_unavailable") from None
 
     def file_clipboard(self, paths=None):
@@ -1094,7 +1098,7 @@ def main():
     parser.add_argument("--port", type=int, default=6990)
     parser.add_argument("--target-host", default="127.0.0.1")
     parser.add_argument("--target-port", type=int, default=5901)
-    parser.add_argument("--input-display", help="Local X11 display for clipboard-free text input")
+    parser.add_argument("--input-display", help="Local X11 display for desktop input and clipboard access")
     parser.add_argument("--web", default=str(REPO))
     parser.add_argument("--files", default=str(Path.home() / "Downloads/noVNC"))
     parser.add_argument("--state", default=str(Path.home() / ".local/state/novnc-files"))
@@ -1121,6 +1125,7 @@ def main():
             args.target_host in ("127.0.0.1", "localhost", "::1") and
             5900 <= args.target_port <= 5999):
         server.text_input_display = f":{args.target_port - 5900}"
+    logging.info("Clipboard X11 display: %s", server.text_input_display or "unconfigured")
     server.start_server()
 
 

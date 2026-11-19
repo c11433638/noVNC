@@ -3,7 +3,7 @@
 刷新 noVNC 页面后，点击工具栏中的文件夹图标（剪贴板旁边）。桌面和手机浏览器均可使用，HTTP 和 HTTPS 共用同一接口。
 
 - **上传**：点击“上传文件”，可以多选；文件保存到当前显示的远端文件夹。
-- **下载**：将远端文件放进 `/home/ubuntu/Downloads/noVNC`，点击面板中的“刷新”，然后点击文件旁的“下载”。也可以进入该文件夹下的子文件夹。
+- **下载**：将远端文件放进 `~/Downloads/noVNC`，点击面板中的“刷新”，然后点击文件旁的“下载”。也可以进入该文件夹下的子文件夹。
 - **移到垃圾桶**：点击文件旁的按钮并确认。需要时可以在远端 Xfce 文件管理器的垃圾桶里恢复，网关使用系统的 `gio` 命令。
 - 远端桌面已有 **“noVNC 文件传输”** 文件夹快捷入口。
 - **同名文件**：自动另存为 `文件名 (1).扩展名` 等名称，保留原文件。
@@ -47,6 +47,10 @@ NOVNC_FILES_DIR=/path/to/transfer VNC_PASSWORD_FILE=/path/to/vnc/passwd ./vnc-co
 ```
 
 `web-stop` 只停止网页网关。原有 `stop` 和 `restart` 会停止 VNC 桌面，应按原来的用途使用。
+
+在另一台服务器拉取更新后，用运行 VNC 桌面的账户执行 `./vnc-control.sh web-restart`，再刷新 `/vnc.html`。网页、WebSocket 和 `/api/files/` 需要由同一地址上的 noVNC 网关提供。启动脚本会从 `tigervncserver -list` 查找 `VNC_PORT` 对应的显示编号，也可显式设置 `VNC_DISPLAY`。若直接运行 `utils/novnc_gateway.py`，用 `--input-display` 指定显示编号。
+
+图片副本默认保存在网关账户的 `~/.local/state/novnc-files/clipboard/`。可通过网关的 `--state` 参数指定其他状态目录。遇到剪贴板不可用时，查看 `./vnc-control.sh status` 列出的网页网关日志，确认显示编号、GTK 3 库和 X11 访问权限。
 
 验证文件接口：
 
