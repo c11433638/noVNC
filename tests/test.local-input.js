@@ -23,6 +23,7 @@ describe('Local input method', function () {
         fetchStub = null;
         sends = [];
         UI.rfb = {
+            _pressedControlKeys: new Set(),
             sendKey: (keysym, code, down) => sends.push([keysym, code, down, Date.now()]),
             pasteText: sinon.stub().returns(false),
         };
@@ -152,6 +153,45 @@ describe('Local input method', function () {
             send.restore();
         }
     });
+
+    for (const controlAlreadySent of [false, true]) {
+        it(`should send a Ctrl+V chord when Windows Ctrl is ${controlAlreadySent ? 'already sent' : 'waiting'}`, function () {
+            const original = Object.getOwnPropertyDescriptor(window, 'navigator');
+            Object.defineProperty(window, 'navigator', { value: { platform: 'Win32' } });
+            const connected = UI.connected;
+            const send = sinon.stub(RFB.messages, 'keyEvent');
+            Object.assign(UI.rfb, {
+                _rfbConnectionState: 'connected',
+                viewOnly: false,
+                sendKey: RFB.prototype.sendKey,
+            });
+            Object.defineProperty(UI.rfb, 'controlKeyDown',
+                                  Object.getOwnPropertyDescriptor(RFB.prototype, 'controlKeyDown'));
+            UI.connected = true;
+            UI.sameOriginConnection = true;
+            const keyboard = new Keyboard(input);
+            keyboard.onkeyevent = (keysym, code, down) => UI.rfb.sendKey(keysym, code, down);
+            try {
+                keyboard._handleKeyDown(new KeyboardEvent('keydown', {
+                    key: 'Control', code: 'ControlLeft', location: 1, ctrlKey: true,
+                }));
+                if (controlAlreadySent) clock.tick(100);
+                expect(UI.rfb.controlKeyDown).to.equal(controlAlreadySent);
+
+                UI.pasteRemote(UI.rfb);
+
+                const expected = [[KeyTable.XK_Control_L, 1], [KeyTable.XK_v, 1], [KeyTable.XK_v, 0]];
+                if (!controlAlreadySent) expected.push([KeyTable.XK_Control_L, 0]);
+                expect(send.args.map(([, key, down]) => [key, down])).to.deep.equal(expected);
+                expect(UI.rfb.controlKeyDown).to.equal(controlAlreadySent);
+            } finally {
+                keyboard._allKeysUp();
+                send.restore();
+                UI.connected = connected;
+                Object.defineProperty(window, 'navigator', original);
+            }
+        });
+    }
 
     it('should pace a whole committed phrase and keep Enter after it', function () {
         UI.rfb.pasteText.returns(true);

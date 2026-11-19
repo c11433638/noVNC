@@ -41,7 +41,7 @@ export default class Keyboard {
     // ===== PRIVATE METHODS =====
 
     _getRemoteKeyCode(code) {
-        if (this._macShortcuts && (browser.isMac() || browser.isIOS())) {
+        if (this._macShortcuts) {
             if (code === 'MetaLeft') return 'ControlLeft';
             if (code === 'MetaRight') return 'ControlRight';
         }
@@ -49,6 +49,10 @@ export default class Keyboard {
     }
 
     _sendKeyEvent(keysym, code, down, numlock = null, capslock = null) {
+        const remoteCode = this._getRemoteKeyCode(code);
+        if (remoteCode !== code) {
+            keysym = remoteCode === 'ControlLeft' ? KeyTable.XK_Control_L : KeyTable.XK_Control_R;
+        }
         if (down) {
             this._keyDownList[code] = keysym;
         } else {
@@ -59,8 +63,7 @@ export default class Keyboard {
             delete this._keyDownList[code];
         }
 
-        const remoteCode = this._getRemoteKeyCode(code);
-        // Command and physical Ctrl can hold the same remote modifier.
+        // Meta and physical Ctrl can hold the same remote modifier.
         // Releasing either must not release Ctrl while the other is held.
         if (this._macShortcuts && remoteCode.startsWith('Control')) {
             for (const pressedCode in this._keyDownList) {
@@ -184,11 +187,6 @@ export default class Keyboard {
         // server. This method is used by RealVNC and TigerVNC (and
         // possibly others).
         if (browser.isMac() || browser.isIOS()) {
-            if (this._macShortcuts && code === 'MetaLeft') {
-                keysym = KeyTable.XK_Control_L;
-            } else if (this._macShortcuts && code === 'MetaRight') {
-                keysym = KeyTable.XK_Control_R;
-            }
             switch (keysym) {
                 case KeyTable.XK_Super_L:
                     keysym = KeyTable.XK_Alt_L;

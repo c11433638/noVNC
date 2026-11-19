@@ -333,15 +333,16 @@ describe('Key event handling', function () {
             Object.defineProperty(window, 'navigator', origNavigator);
         });
 
-        for (const platform of ['Mac', 'iPad']) {
+        for (const platform of ['Mac', 'iPad', 'Win32', 'Linux']) {
             for (const [side, location, keysym] of [['Left', 1, 0xffe3], ['Right', 2, 0xffe4]]) {
-                it(`should send Command+C as Ctrl+C with matching scan codes on ${platform} (${side})`, function () {
+                it(`should send Meta+C as Ctrl+C with matching scan codes on ${platform} (${side})`, function () {
                     window.navigator.platform = platform;
                     kbd._handleKeyDown(keyevent('keydown', {
                         code: 'Meta' + side, key: 'Meta', location, metaKey: true,
                     }));
                     const copy = keyevent('keydown', { code: 'KeyC', key: 'c', metaKey: true });
                     kbd._handleKeyDown(copy);
+                    kbd._handleKeyUp(keyevent('keyup', { code: 'KeyC', key: 'c', metaKey: true }));
                     kbd._handleKeyUp(keyevent('keyup', { code: 'Meta' + side, key: 'Meta' }));
 
                     expect(kbd.onkeyevent.args.map(args => args.slice(0, 3))).to.deep.equal([
@@ -391,8 +392,21 @@ describe('Key event handling', function () {
             ]);
         });
 
-        it('should preserve non-Mac Meta keys even when the setting is enabled', function () {
-            window.navigator.platform = 'Linux';
+        it('should preserve Ctrl shortcuts already remapped on Windows', function () {
+            window.navigator.platform = 'Win32';
+            kbd._handleKeyDown(keyevent('keydown', { code: 'ControlLeft', key: 'Control', location: 1, ctrlKey: true }));
+            kbd._handleKeyDown(keyevent('keydown', { code: 'KeyC', key: 'c', ctrlKey: true }));
+            kbd._handleKeyUp(keyevent('keyup', { code: 'KeyC', key: 'c', ctrlKey: true }));
+            kbd._handleKeyUp(keyevent('keyup', { code: 'ControlLeft', key: 'Control' }));
+            expect(kbd.onkeyevent.args.map(args => args.slice(0, 3))).to.deep.equal([
+                [0xffe3, 'ControlLeft', true], [0x63, 'KeyC', true],
+                [0x63, 'KeyC', false], [0xffe3, 'ControlLeft', false],
+            ]);
+        });
+
+        it('should send the Windows key as Meta when the setting is disabled', function () {
+            window.navigator.platform = 'Win32';
+            kbd.macShortcuts = false;
             kbd._handleKeyDown(keyevent('keydown', { code: 'MetaLeft', key: 'Meta', location: 1 }));
             expect(kbd.onkeyevent).to.have.been.calledOnceWith(0xffeb, 'MetaLeft', true);
         });

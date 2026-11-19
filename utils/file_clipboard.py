@@ -29,7 +29,7 @@ class ClipboardUnavailable(Exception):
     pass
 
 
-def desktop_selection(display, uris=None, image=None):
+def desktop_selection(display, uris=None, image=None, media_type="image/png"):
     env = dict(os.environ, DISPLAY=display, GDK_BACKEND="x11")
     args = [sys.executable, str(Path(__file__).resolve())]
     try:
@@ -42,7 +42,7 @@ def desktop_selection(display, uris=None, image=None):
         with tempfile.TemporaryFile() as selection:
             selection.write(b"\n".join(uris))
             selection.seek(0)
-            owner = subprocess.Popen(args + ["write"] + ([str(image)] if image else []),
+            owner = subprocess.Popen(args + ["write"] + ([str(image), media_type] if image else []),
                                      env=env, stdin=selection,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
@@ -210,8 +210,8 @@ class X11Clipboard:
         state["changed"] = bool(since) and (bool(fired) or state["token"] != since)
         return state
 
-    def write(self, uris, image=None):
-        names = (GNOME_FILES, URI_LIST, ORIGIN) + ((IMAGE_PNG,) if image else ())
+    def write(self, uris, image=None, media_type=IMAGE_PNG):
+        names = (GNOME_FILES, URI_LIST, ORIGIN) + ((media_type,) if image else ())
         targets = (Target * len(names))(*(Target(name, 0, i) for i, name in enumerate(names)))
         atoms = tuple(self.atom(name, 0) for name in names)
         contents = (b"copy\n" + uris, b"\r\n".join(uris.splitlines()) + b"\r\n", b"1", image)
@@ -246,4 +246,8 @@ if __name__ == "__main__":
         uris = sys.stdin.buffer.read(MAX_SELECTION_BYTES + 1)
         if not 0 < len(uris) <= MAX_SELECTION_BYTES:
             raise ClipboardUnavailable
-        clipboard.write(uris, Path(sys.argv[2]).read_bytes() if len(sys.argv) > 2 else None)
+        if len(sys.argv) > 2:
+            media_type = sys.argv[3].encode("ascii") if len(sys.argv) > 3 else IMAGE_PNG
+            clipboard.write(uris, Path(sys.argv[2]).read_bytes(), media_type)
+        else:
+            clipboard.write(uris)

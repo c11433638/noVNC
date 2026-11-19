@@ -75,9 +75,9 @@ protocol stream.
     Default value is `6`.
 
 `macShortcuts`
-  - Maps macOS/iOS Command to remote Ctrl, including the scan code sent
-    to servers that support extended key events. Disabled in the library
-    by default; the full UI enables it by default on macOS and iOS.
+  - Maps the Command, Windows, or Super key to remote Ctrl, including the
+    scan code sent to servers that support extended key events. The full UI
+    enables this by default. The library requires setting it explicitly.
 
 `wheelReverse`
   - Reverses horizontal and vertical wheel direction. Disabled by default,

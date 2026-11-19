@@ -168,6 +168,7 @@ export default class RFB extends EventTargetMixin {
         this._flushing = false;         // Display flushing state
         this._asyncClipboard = null;    // Async clipboard object
         this._keyboard = null;          // Keyboard input handler object
+        this._pressedControlKeys = new Set();
         this._gestures = null;          // Gesture input handler object
         this._resizeObserver = null;    // Resize observer object
 
@@ -333,6 +334,8 @@ export default class RFB extends EventTargetMixin {
 
     get macShortcuts() { return this._keyboard.macShortcuts; }
     set macShortcuts(enabled) { this._keyboard.macShortcuts = enabled; }
+
+    get controlKeyDown() { return this._pressedControlKeys.size > 0; }
 
     get wheelSpeed() { return this._wheelSpeed; }
     set wheelSpeed(speed) {
@@ -647,6 +650,11 @@ export default class RFB extends EventTargetMixin {
             this.sendKey(keysym, code, true, numlock, capslock);
             this.sendKey(keysym, code, false, numlock, capslock);
             return;
+        }
+
+        if (code === 'ControlLeft' || code === 'ControlRight') {
+            if (down) this._pressedControlKeys.add(code);
+            else this._pressedControlKeys.delete(code);
         }
 
         if (numlock !== null || capslock !== null) {

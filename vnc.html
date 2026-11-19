@@ -53,12 +53,12 @@
     <script type="importmap" data-cfasync="false">
     {
         "imports": {
-            "./app/ui.js": "./app/ui.js?v=20261118b",
+            "./app/ui.js": "./app/ui.js?v=20261119c",
             "./app/browser-session.js": "./app/browser-session.js?v=20261014b",
-            "./app/file-transfer.js": "./app/file-transfer.js?v=20261118b",
+            "./app/file-transfer.js": "./app/file-transfer.js?v=20261119b",
             "./app/localization.js": "./app/localization.js?v=20261008b",
-            "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261014a",
-            "./core/rfb.js": "./core/rfb.js?v=20261118b",
+            "./core/input/keyboard.js": "./core/input/keyboard.js?v=20261119c",
+            "./core/rfb.js": "./core/rfb.js?v=20261119c",
             "./core/encodings.js": "./core/encodings.js?v=20261110a"
         }
     }
@@ -204,11 +204,11 @@
                 </p>
                 <textarea id="noVNC_clipboard_text" rows=5></textarea>
                 <div id="noVNC_clipboard_files" class="noVNC_hidden">
-                    <p>Paste local files here, or choose files. Then press Ctrl+V in the remote file manager.</p>
+                    <p>Click the destination in the remote desktop before choosing files to paste.</p>
                     <div class="noVNC_files_actions">
                         <label class="noVNC_files_upload">
-                            <span>Choose files</span>
-                            <input type="file" id="noVNC_clipboard_file_input" multiple aria-label="Choose files">
+                            <span>Choose and paste files</span>
+                            <input type="file" id="noVNC_clipboard_file_input" multiple aria-label="Choose and paste files">
                         </label>
                         <button type="button" id="noVNC_clipboard_read_files">Download copied remote files</button>
                     </div>
@@ -306,7 +306,7 @@
                         <label>
                             <input id="noVNC_setting_mac_shortcuts" type="checkbox"
                                    class="toggle">
-                            Use Mac shortcuts (⌘ → Ctrl)
+                            Use Mac shortcuts (Command or Windows key → Ctrl)
                         </label>
                     </li>
                     <li>

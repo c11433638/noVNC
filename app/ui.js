@@ -22,6 +22,8 @@ import * as BrowserSession from './browser-session.js';
 import * as WebUtil from "./webutil.js";
 
 const PAGE_TITLE = "noVNC";
+const CLIPBOARD_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_CACHED_CLIPBOARD_BYTES = 16 * 1024 * 1024;
 
 const FALLBACK_TIMEOUT = 4000;
 const RECONNECT_DELAY = 1000;
@@ -102,12 +104,13 @@ const UI = {
     localImageBaseline: null,
     localImagePublished: null,
     localImageSync: null,
+    localImageSend: null,
+    localImageRevision: 0,
     remoteCopiedSinceConnect: false,
     pasteKeyHeld: false,
-    pasteModifierHeld: false,
     pendingPaste: null,
     pendingPasteTimer: null,
-    localFilesPublished: null,
+    uploadedClipboardFiles: null,
     remoteFilesAt: 0,
     remotePathHold: null,
     encryptedConnection: false,
@@ -138,7 +141,7 @@ const UI = {
 
         // Set up translations
         try {
-            await l10n.setup(LINGUAS, "app/locale/", '20261118b');
+            await l10n.setup(LINGUAS, "app/locale/", '20261119c');
         } catch (err) {
             Log.Error("Failed to load translations: " + err);
         }
@@ -280,7 +283,7 @@ const UI = {
         UI.initSetting('view_only', false);
         UI.initSetting('ime_input', true);
         UI.initSetting('ime_clipboard', false);
-        UI.initSetting('mac_shortcuts', isMac() || isIOS());
+        UI.initSetting('mac_shortcuts', true);
         // Fingers are too coarse to point with on a phone or tablet
         UI.initSetting('touch_mode', isTouchDevice &&
                        (UI.smallTouchScreen || isIOS() || isAndroid()) ? 'touchpad' : 'direct');
@@ -595,13 +598,19 @@ const UI = {
         document.getElementById('noVNC_clipboard_file_input').addEventListener('change', (e) => {
             const files = Array.from(e.target.files);
             e.target.value = '';
-            UI.clipboardUpload(files);
+            if (!files.length || !UI.canTransferClipboardFiles()) return;
+            const rfb = UI.rfb;
+            UI.closeClipboardPanel();
+            UI.pasteLocalFiles(files, 0).then(sent => sent && UI.pasteRemote(rfb));
         });
         document.getElementById('noVNC_clipboard_notice_close')
             .addEventListener('click', UI.hideClipboardNotice);
         window.addEventListener('keydown', UI.handlePasteKeyDown, true);
         window.addEventListener('keyup', UI.handlePasteKeyUp, true);
         window.addEventListener('paste', UI.handleDesktopPaste, true);
+        window.addEventListener('blur', () => {
+            UI.pasteKeyHeld = false;
+        });
         document.getElementById('noVNC_clipboard_read_files').addEventListener('click', () => {
             if (!UI.canTransferClipboardFiles()) return;
             UI.openFilesPanel(false);
@@ -1476,7 +1485,7 @@ const UI = {
         return { blob: await item.getType('image/png'), fileIcon };
     },
 
-    async imageHash(blob) {
+    async hashClipboardBlob(blob) {
         const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
         return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
     },
@@ -1498,34 +1507,71 @@ const UI = {
     },
 
     async publishLocalImage(pasting) {
+        const rfb = UI.rfb;
+        const revision = UI.localImageRevision;
         const image = await UI.readLocalImage();
+        if (UI.rfb !== rfb || UI.localImageRevision !== revision) return true;
         if (!image) {
             UI.localImageBaseline ??= '';
             return false;
         }
-        // The paste event carries the real file when the key is pressed
+        // A file manager may expose only the icon through the async API.
         if (image.fileIcon && !pasting) return true;
         const { blob } = image;
-        const hash = await UI.imageHash(blob);
+        const hash = await UI.hashClipboardBlob(blob);
+        if (UI.rfb !== rfb || UI.localImageRevision !== revision) return true;
         const first = UI.localImageBaseline === null;
         if (first) UI.localImageBaseline = hash;
         const stale = hash === UI.localImageBaseline &&
                       (!pasting || UI.remoteCopiedSinceConnect);
         if (hash === UI.localImagePublished || stale) return true;
 
+        if (await UI.queueLocalImage(blob, rfb)) UI.localImagePublished = hash;
+        return true;
+    },
+
+    queueLocalImage(blob, rfb, name) {
+        const task = Promise.resolve(UI.localImageSend)
+            .then(() => UI.sendLocalImage(blob, rfb, name))
+            .finally(() => {
+                if (UI.localImageSend === task) UI.localImageSend = null;
+            });
+        UI.localImageSend = task;
+        return task;
+    },
+
+    async sendLocalImage(blob, rfb, name) {
+        if (UI.rfb !== rfb || !UI.canTransferClipboardFiles()) return false;
+        rfb.preserveClipboardOnFocus();
         UI.showClipboardNotice(_('Sending the local image to the remote computer…'));
         try {
-            await UI.fileTransfer.sendClipboardImage(blob);
-            UI.localImagePublished = hash;
-            UI.localFilesPublished = null;
+            await UI.fileTransfer.sendClipboardImage(blob, name);
+            if (UI.rfb !== rfb) return false;
             UI.showClipboardNotice(_('The local image is on the remote clipboard.'));
+            return true;
         } catch (err) {
-            UI.showClipboardNotice(err.message, [{
-                label: _('Close'),
-                action: UI.hideClipboardNotice,
-            }]);
+            if (UI.rfb === rfb) {
+                UI.showClipboardNotice(err.message, [{
+                    label: _('Close'),
+                    action: UI.hideClipboardNotice,
+                }]);
+            }
+            return false;
         }
-        return true;
+    },
+
+    async pasteLocalImage(file) {
+        const rfb = UI.rfb;
+        // An earlier asynchronous clipboard read may still be waiting for
+        // permission. Ignore its result in favor of the actual paste event.
+        ++UI.localImageRevision;
+        const sent = await UI.queueLocalImage(file, rfb, file.name);
+        if (sent && file.type === 'image/png' && window.crypto?.subtle) {
+            UI.hashClipboardBlob(file).then((hash) => {
+                if (UI.rfb === rfb) UI.localImagePublished = hash;
+            }).catch(() => {});
+        }
+        return sent;
     },
 
     handlePasteKeyDown(e) {
@@ -1537,7 +1583,6 @@ const UI = {
         // the default action of this key press has to go ahead.
         e.stopImmediatePropagation();
         UI.pasteKeyHeld = true;
-        UI.pasteModifierHeld = true;
         if (e.repeat) {
             e.preventDefault();
             return;
@@ -1545,21 +1590,24 @@ const UI = {
 
         const rfb = UI.rfb;
         const keysym = e.shiftKey ? KeyTable.XK_V : KeyTable.XK_v;
-        UI.pendingPaste = () => {
-            if (UI.rfb !== rfb) return;
-            // A large transfer can outlast the key press
-            const press = !UI.pasteModifierHeld;
-            if (press) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', true);
-            rfb.sendKey(keysym, 'KeyV', true);
-            rfb.sendKey(keysym, 'KeyV', false);
-            if (press) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', false);
-        };
+        UI.pendingPaste = () => UI.pasteRemote(rfb, keysym);
         clearTimeout(UI.pendingPasteTimer);
         UI.pendingPasteTimer = setTimeout(() => {
             const paste = UI.pendingPaste;
             UI.pendingPaste = null;
             if (paste) UI.syncLocalImage(true).finally(paste);
         }, 250);
+    },
+
+    pasteRemote(rfb, keysym = KeyTable.XK_v) {
+        if (UI.rfb !== rfb || !UI.canTransferClipboardFiles()) return;
+        // On Windows Ctrl may still be waiting for AltGr detection. A
+        // transfer can also outlast the physical modifier press.
+        const sendControl = !rfb.controlKeyDown;
+        if (sendControl) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', true);
+        rfb.sendKey(keysym, 'KeyV', true);
+        rfb.sendKey(keysym, 'KeyV', false);
+        if (sendControl) rfb.sendKey(KeyTable.XK_Control_L, 'ControlLeft', false);
     },
 
     handleDesktopPaste(e) {
@@ -1571,7 +1619,13 @@ const UI = {
         e.stopImmediatePropagation();
 
         const { files, folders } = UI.pastedFiles(e.clipboardData);
-        if (files.length) {
+        if (!folders && files.length === 1 && CLIPBOARD_IMAGE_TYPES.has(files[0].type)) {
+            const data = e.clipboardData;
+            const richText = Array.from(data.types).includes('text/html') &&
+                             data.getData('text/plain').replace(/[\s\uFFFC]/g, '');
+            if (richText) paste();
+            else UI.pasteLocalImage(files[0]).then(sent => sent && paste());
+        } else if (files.length) {
             UI.pasteLocalFiles(files, folders).then(sent => sent && paste());
         } else if (folders) {
             UI.showClipboardNotice(_('Folders cannot be pasted. Compress the folder first.'));
@@ -1592,25 +1646,54 @@ const UI = {
             const file = item.getAsFile();
             if (file) files.push(file);
         }
-        // Copied pixels arrive as a just-created file called image.png
-        const bitmap = files.length === 1 && files[0].name === 'image.png' &&
-                       Date.now() - files[0].lastModified < 5000;
-        return { files: bitmap && UI.canSyncLocalImage() ? [] : files, folders };
+        // Some browsers expose the files on DataTransfer.files only.
+        if (!files.length && !folders) files.push(...Array.from(data?.files || []));
+        return { files, folders };
+    },
+
+    async clipboardFilesKey(files) {
+        const bytes = files.reduce((total, file) => total + file.size, 0);
+        if (!window.crypto?.subtle || bytes > MAX_CACHED_CLIPBOARD_BYTES || files.length > 100) return null;
+        try {
+            const fingerprints = await Promise.all(files.map(async file => [file.name, await UI.hashClipboardBlob(file)]));
+            return JSON.stringify(fingerprints);
+        } catch (err) {
+            return null;
+        }
     },
 
     async pasteLocalFiles(files, folders) {
-        const key = files.map(file => [file.name, file.size, file.lastModified].join('|')).join('\n');
-        if (key === UI.localFilesPublished) return true;
+        const rfb = UI.rfb;
+        const key = await UI.clipboardFilesKey(files);
+        if (UI.rfb !== rfb || !UI.canTransferClipboardFiles()) return false;
         if (UI.fileTransfer.busy) {
             UI.showClipboardNotice(_('Another file transfer is still running.'));
             return false;
         }
-        // On failure the file panel stays open and shows the reason
-        if (!await UI.clipboardUpload(files)) return false;
-        UI.localFilesPublished = key;
+        const previous = UI.uploadedClipboardFiles;
+        let uploaded;
+        if (key && previous?.key === key) {
+            try {
+                rfb.preserveClipboardOnFocus();
+                await UI.fileTransfer.copyToClipboard(previous.files);
+                uploaded = previous.files;
+            } catch (err) {
+                if (!['not_found', 'invalid_path', 'file_changed'].includes(err.code)) {
+                    if (UI.rfb === rfb) UI.showClipboardNotice(err.message);
+                    return false;
+                }
+            }
+        }
+        if (UI.rfb !== rfb) return false;
+        if (!uploaded) {
+            // On failure the file panel stays open and shows the reason.
+            uploaded = await UI.clipboardUpload(files);
+            if (!uploaded || UI.rfb !== rfb) return false;
+            UI.uploadedClipboardFiles = key ? { key, files: uploaded } : null;
+            UI.closeFilesPanel();
+            UI.focusKeyboard();
+        }
         UI.localImagePublished = null;
-        UI.closeFilesPanel();
-        UI.focusKeyboard();
         UI.showClipboardNotice(folders ?
             _('Files sent. Folders were skipped, compress them first.') :
             _('The local files are on the remote clipboard.'));
@@ -1635,9 +1718,6 @@ const UI = {
     },
 
     handlePasteKeyUp(e) {
-        if (['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'].includes(e.code)) {
-            UI.pasteModifierHeld = false;
-        }
         if (e.code === 'KeyV' && UI.pasteKeyHeld) {
             UI.pasteKeyHeld = false;
             e.preventDefault();
@@ -1665,7 +1745,7 @@ const UI = {
         // Browsers re-encode images. Remember the result so that it is not
         // mistaken for a new local copy and sent back.
         const copied = await UI.readLocalImage().catch(() => null);
-        if (copied) UI.localImagePublished = await UI.imageHash(copied.blob);
+        if (copied) UI.localImagePublished = await UI.hashClipboardBlob(copied.blob);
     },
 
     async receiveRemoteImage() {
@@ -1716,18 +1796,18 @@ const UI = {
 
     // Resolves true once the files are on the remote clipboard
     async clipboardUpload(files) {
-        if (!UI.canTransferClipboardFiles() || !files.length) return false;
+        if (!UI.canTransferClipboardFiles() || !files.length) return null;
         UI.openFilesPanel(false);
         const rfb = UI.rfb;
-        let published = false;
+        let published = null;
         await UI.fileTransfer.upload(files, {
-            onUploaded: async (paths) => {
+            onUploaded: async (uploaded) => {
                 if (UI.rfb !== rfb || !UI.canTransferClipboardFiles()) {
                     throw new Error(_('The remote connection changed. The uploaded files are in the transfer folder.'));
                 }
                 rfb.preserveClipboardOnFocus();
-                await UI.fileTransfer.copyToClipboard(paths);
-                published = true;
+                await UI.fileTransfer.copyToClipboard(uploaded);
+                published = uploaded;
             },
         });
         return published;
@@ -2021,7 +2101,7 @@ const UI = {
         UI.updateImeInput();
         UI.localImageBaseline = null;
         UI.remoteCopiedSinceConnect = false;
-        UI.localFilesPublished = null;
+        UI.uploadedClipboardFiles = null;
         UI.rfb.beforeClipboardSync = () => UI.syncLocalImage();
         if (UI.sameOriginConnection) UI.rfb.clipboardWriteHold = UI.holdRemotePaths;
         if (UI.sameOriginConnection) UI.watchRemoteClipboard();

@@ -158,6 +158,21 @@ class BrowserSessionTests(unittest.TestCase):
             self.assertEqual(self.request("clipboard", {"paths": [name]}, self.cookie)[0], 200)
             clipboard.assert_called_once_with(":98", [uploaded.as_uri().encode()])
 
+    def test_republishing_an_upload_checks_the_original_file_revision(self):
+        owner = self.store.session(self.cookie, browser=True)
+        upload = self.store.create_upload(owner, {"name": "reply.pdf", "size": 4})
+        with self.store.upload(upload["id"], owner) as (file, *_):
+            file.write(b"file")
+        completed = self.store.complete(upload["id"], owner)
+        selection = {"paths": [completed["name"]], "revisions": [completed["revision"]]}
+        with patch.object(gateway, "desktop_selection") as clipboard:
+            self.assertEqual(self.request("clipboard", selection, self.cookie)[0], 200)
+            self.assertEqual(self.request("clipboard", selection, self.cookie)[0], 200)
+            uploaded = self.store.root / completed["name"]
+            uploaded.write_bytes(b"changed")
+            self.assertEqual(self.request("clipboard", selection, self.cookie)[0], 409)
+            self.assertEqual(clipboard.call_count, 2)
+
     def test_remote_clipboard_download_is_bound_to_selection_and_session(self):
         copied = self.work / "远端 #2.txt"
         copied.write_bytes(b"original")
@@ -260,9 +275,26 @@ class BrowserSessionTests(unittest.TestCase):
             self.assertEqual(self.post_image(b"not an image", self.cookie)[0], 415)
             clipboard.assert_not_called()
             self.assertEqual(self.post_image(png, self.cookie)[0], 200)
-        saved = self.store.state / "clipboard" / "clipboard-image.png"
+        saved = next((self.store.state / "clipboard").glob("*/clipboard-image.png"))
         self.assertEqual(saved.read_bytes(), png)
-        clipboard.assert_called_once_with(":98", [saved.as_uri().encode()], saved)
+        clipboard.assert_called_once_with(":98", [saved.as_uri().encode()], saved, "image/png")
+
+    def test_named_image_remains_a_file_and_keeps_its_clipboard_type(self):
+        jpeg = b"\xff\xd8\xffjpeg"
+        name = "照片.jpg"
+        endpoint = "clipboard-image?name=" + quote(name)
+        with patch.object(gateway, "desktop_selection") as clipboard:
+            self.assertEqual(self.post_image(gateway.PNG_SIGNATURE + b"previous", self.cookie)[0], 200)
+            self.assertEqual(self.request(endpoint, cookie=self.cookie, raw=jpeg,
+                                          headers={"Content-Type": "image/jpeg"})[0], 200)
+            self.assertEqual(self.request(endpoint, cookie=self.cookie, raw=jpeg + b"new",
+                                          headers={"Content-Type": "image/jpeg"})[0], 200)
+        saved, latest = [call.args[2] for call in clipboard.call_args_list[1:]]
+        self.assertEqual(saved.name, name)
+        self.assertNotEqual(saved, latest)
+        self.assertEqual(saved.read_bytes(), jpeg)
+        self.assertEqual(latest.read_bytes(), jpeg + b"new")
+        self.assertEqual(clipboard.call_args.args, (":98", [latest.as_uri().encode()], latest, "image/jpeg"))
 
     def test_clipboard_image_requires_session(self):
         with patch.object(gateway, "clipboard_image", return_value=b"") as image:

@@ -255,8 +255,11 @@ export default class FileTransfer {
         }
     }
 
-    copyToClipboard(paths) {
-        return this._request('clipboard', {}, { paths });
+    copyToClipboard(files) {
+        return this._requestWithSession('clipboard', {}, {
+            paths: files.map(file => file.path),
+            revisions: files.map(file => file.revision),
+        });
     }
 
     watchClipboard(since) {
@@ -272,10 +275,10 @@ export default class FileTransfer {
         return new Blob([await response.arrayBuffer()], { type: 'image/png' });
     }
 
-    async sendClipboardImage(blob) {
-        const send = () => fetch(this._url('clipboard-image'), {
+    async sendClipboardImage(blob, name = '') {
+        const send = () => fetch(this._url('clipboard-image', { name }), {
             method: 'POST',
-            headers: { 'X-NoVNC-Transfer': '1', 'Content-Type': 'image/png' },
+            headers: { 'X-NoVNC-Transfer': '1', 'Content-Type': blob.type || 'image/png' },
             body: blob,
             credentials: 'same-origin',
             cache: 'no-store',
@@ -503,7 +506,10 @@ export default class FileTransfer {
                 if (this._cancelled) throw new DOMException('', 'AbortError');
                 const result = await this._request('complete', { id }, {});
                 if (result.name !== file.name) renamed.push(result.name);
-                if (onUploaded) uploaded.push(this._path ? this._path + '/' + result.name : result.name);
+                if (onUploaded) {
+                    const path = this._path ? this._path + '/' + result.name : result.name;
+                    uploaded.push({ path, revision: result.revision });
+                }
                 saveResumeRecord(resumeKey, null);
                 id = null;
                 completed += file.size;
@@ -511,7 +517,7 @@ export default class FileTransfer {
             }
             if (onUploaded) {
                 await onUploaded(uploaded);
-                message = _('Files copied. Press Ctrl+V in the remote file manager.');
+                message = _('Files copied. Press Ctrl+V in the remote app.');
             } else {
                 message = _('Upload complete.') + ` (${count})`;
             }

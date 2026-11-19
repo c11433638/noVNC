@@ -21,6 +21,7 @@ import stat
 import subprocess
 import struct
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -58,6 +59,12 @@ INPUT_SOCKET_SECONDS = 90
 LINE_ID = re.compile(r"[A-Za-z0-9]{8,32}")
 CLIPBOARD_TOKEN = re.compile(r"[0-9a-f]{32}")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+CLIPBOARD_IMAGE_FORMATS = {
+    "image/png": ((".png",), (PNG_SIGNATURE,)),
+    "image/jpeg": ((".jpg", ".jpeg", ".jfif"), (b"\xff\xd8\xff",)),
+    "image/gif": ((".gif",), (b"GIF87a", b"GIF89a")),
+    "image/webp": ((".webp",), (b"RIFF",)),
+}
 LINE_SECONDS = 2
 
 
@@ -271,11 +278,13 @@ class FileStore:
     def file_revision(info):
         return f"{info.st_dev:x}-{info.st_ino:x}-{info.st_ctime_ns:x}"
 
-    def clipboard_uris(self, paths):
+    def clipboard_uris(self, paths, revisions=None):
         if not isinstance(paths, list) or not 0 < len(paths) <= CLIPBOARD_FILE_LIMIT:
             raise APIError(400, "invalid_clipboard_selection")
+        if revisions is not None and (not isinstance(revisions, list) or len(revisions) != len(paths)):
+            raise APIError(400, "invalid_clipboard_selection")
         uris = []
-        for path in paths:
+        for index, path in enumerate(paths):
             parts = self.components(path)
             if not parts:
                 raise APIError(400, "invalid_path")
@@ -283,6 +292,8 @@ class FileStore:
                 info = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode):
                     raise APIError(403, "invalid_path")
+                if revisions is not None and revisions[index] != self.file_revision(info):
+                    raise APIError(409, "file_changed")
             uris.append(self.root.joinpath(*parts).as_uri().encode("ascii"))
         return uris
 
@@ -376,18 +387,26 @@ class FileStore:
                 raise APIError(409, "file_changed")
             yield file, Path(path).name
 
-    def save_clipboard_image(self, image):
-        """Keep the latest pasted image where file managers can copy it from."""
+    def save_clipboard_image(self, image, name):
+        """Keep a file-backed clipboard image available for delayed reads."""
         folder = self.state / "clipboard"
         folder.mkdir(mode=0o700, exist_ok=True)
-        target = folder / "clipboard-image.png"
-        partial = folder / f".{secrets.token_hex(8)}.part"
+        entry = Path(tempfile.mkdtemp(prefix="selection-", dir=folder))
+        target = entry / name
         try:
-            with open(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as file:
-                file.write(image)
-            os.replace(partial, target)
-        finally:
-            partial.unlink(missing_ok=True)
+            target.write_bytes(image)
+        except OSError:
+            shutil.rmtree(entry, ignore_errors=True)
+            raise
+        # Browsers can attach several pasted images before reading the bytes
+        # when the user submits a form. Do not overwrite prior selections.
+        cutoff = time.time() - CLIPBOARD_SECONDS
+        for stale in folder.glob("selection-*"):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    shutil.rmtree(stale, ignore_errors=True)
+            except FileNotFoundError:
+                continue
         return target
 
     def trash(self, path, revision):
@@ -469,7 +488,8 @@ class FileStore:
                     raise APIError(409, "name_conflict")
             part.unlink()
             manifest.unlink()
-            return {"name": name, "size": meta["size"]}
+            return {"name": name, "size": meta["size"],
+                    "revision": self.file_revision(os.fstat(file.fileno()))}
 
 
 class FileRequestHandler(ProxyRequestHandler):
@@ -799,15 +819,27 @@ class FileRequestHandler(ProxyRequestHandler):
             state.update(self.server.file_store.register_clipboard(owner, uris))
         return state
 
-    def receive_clipboard_image(self):
+    def receive_clipboard_image(self, name):
+        media_type = self.headers.get_content_type()
+        image_format = CLIPBOARD_IMAGE_FORMATS.get(media_type)
+        if image_format is None:
+            raise APIError(415, "invalid_request")
         length = self.body_length(MAX_IMAGE_BYTES)
         image = self.rfile.read(length)
         if len(image) != length:
             raise APIError(400, "incomplete_upload")
-        if not image.startswith(PNG_SIGNATURE):
+        suffixes, signatures = image_format
+        if not image.startswith(signatures) or (media_type == "image/webp" and image[8:12] != b"WEBP"):
             raise APIError(415, "invalid_request")
-        path = self.server.file_store.save_clipboard_image(image)
-        self.desktop_clipboard(desktop_selection, [path.as_uri().encode("ascii")], path)
+        store = self.server.file_store
+        try:
+            valid_name = len(store.components(name)) == 1 and name.lower().endswith(suffixes)
+        except APIError:
+            valid_name = False
+        if not valid_name:
+            name = "clipboard-image" + suffixes[0]
+        path = store.save_clipboard_image(image, name)
+        self.desktop_clipboard(desktop_selection, [path.as_uri().encode("ascii")], path, media_type)
 
     def send_clipboard_image(self):
         image = self.desktop_clipboard(clipboard_image)
@@ -965,13 +997,13 @@ class FileRequestHandler(ProxyRequestHandler):
         elif endpoint == "clipboard-image" and self.command == "GET":
             self.send_clipboard_image()
         elif endpoint == "clipboard-image" and self.command == "POST":
-            self.receive_clipboard_image()
+            self.receive_clipboard_image(param("name"))
             self.reply(200, {})
         elif endpoint == "clipboard-list" and self.command == "POST":
             self.reply(200, store.register_clipboard(owner, self.file_clipboard()))
         elif endpoint == "clipboard" and self.command == "POST":
-            paths = self.read_json(512 * 1024).get("paths")
-            self.file_clipboard(store.clipboard_uris(paths))
+            selection = self.read_json(512 * 1024)
+            self.file_clipboard(store.clipboard_uris(selection.get("paths"), selection.get("revisions")))
             self.reply(200, {})
         elif endpoint == "clipboard-download" and self.command == "GET":
             folder = store.clipboard_folder(param("id"), owner)
