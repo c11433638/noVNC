@@ -225,8 +225,8 @@ const UI = {
 
         document.documentElement.classList.remove("noVNC_loading");
 
-        let autoconnect = UI.getSetting('autoconnect');
-        if (autoconnect === 'true' || autoconnect == '1') {
+        const autoconnect = UI.getSetting('autoconnect');
+        if ([true, 'true', 1, '1'].includes(autoconnect)) {
             UI.connect();
         } else {
             // Show the connect panel on first load unless autoconnecting
@@ -574,8 +574,8 @@ const UI = {
             .addEventListener('click', UI.approveServer);
         document.getElementById("noVNC_reject_server_button")
             .addEventListener('click', UI.rejectServer);
-        document.getElementById("noVNC_credentials_button")
-            .addEventListener('click', UI.setCredentials);
+        document.getElementById("noVNC_credentials_button").form
+            .addEventListener('submit', UI.setCredentials);
         document.getElementById("noVNC_forget_browser")
             .addEventListener('click', UI.forgetBrowser);
     },
@@ -811,14 +811,9 @@ const UI = {
         statusElem.textContent = text;
         statusElem.classList.add("noVNC_open");
 
-        // If no time was specified, show the status for 1.5 seconds
-        if (typeof time === 'undefined') {
-            time = 1500;
-        }
-
-        // Error messages do not timeout
-        if (statusType !== 'error') {
-            UI.statusTimeout = window.setTimeout(UI.hideStatus, time);
+        // Errors stay visible unless a duration was provided.
+        if (time !== undefined || statusType !== 'error') {
+            UI.statusTimeout = window.setTimeout(UI.hideStatus, time === undefined ? 1500 : time);
         }
     },
 
@@ -2093,8 +2088,6 @@ const UI = {
         UI.showStatus(msg);
         UI.updateVisualState('connected');
 
-        UI.updateBeforeUnload();
-
         // Do this last because it can only be used on rendered elements
         UI.updateImeInput();
         UI.localImageBaseline = null;
@@ -2177,7 +2170,6 @@ const UI = {
 
         UI.updateVisualState('disconnected');
         if (!failed) UI.showStatus(_("Disconnected"), 'normal');
-        UI.updateBeforeUnload();
 
         document.title = PAGE_TITLE;
 
@@ -2201,24 +2193,6 @@ const UI = {
             msg = _("New connection has been rejected");
         }
         UI.showStatus(msg, 'error');
-    },
-
-    handleBeforeUnload(e) {
-        // Trigger a "Leave site?" warning prompt before closing the
-        // page. Modern browsers (Oct 2025) accept either (or both)
-        // preventDefault() or a nonempty returnValue, though the latter is
-        // considered legacy. The custom string is ignored by modern browsers,
-        // which display a native message, but older browsers will show it.
-        e.preventDefault();
-        e.returnValue = _("Are you sure you want to disconnect the session?");
-    },
-
-    updateBeforeUnload() {
-        // Remove first to avoid adding duplicates
-        window.removeEventListener("beforeunload", UI.handleBeforeUnload);
-        if (!UI.rfb?.viewOnly && UI.connected) {
-            window.addEventListener("beforeunload", UI.handleBeforeUnload);
-        }
     },
 
 /* ------^-------
@@ -2831,7 +2805,7 @@ const UI = {
                         UI.pacedTextPending = null;
                         UI.pacedKeys = [];
                         Log.Error(error);
-                        UI.showStatus(_("Text input failed. Please reconnect and try again."), 'error');
+                        UI.showStatus(_("Text input failed. Please reconnect and try again."), 'error', 3000);
                     });
                     return;
                 }
@@ -3231,8 +3205,6 @@ const UI = {
     updateViewOnly() {
         if (!UI.rfb) return;
         UI.rfb.viewOnly = UI.getSetting('view_only');
-
-        UI.updateBeforeUnload();
 
         // Hide input related buttons in view only mode
         if (UI.rfb.viewOnly) {

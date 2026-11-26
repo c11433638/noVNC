@@ -200,13 +200,15 @@ export default class FileTransfer {
         this._element('up').disabled = !this._path;
         this._element('limit').textContent = _('Maximum file size:') + ' ' + sizeLabel(data.maxFileSize);
         const list = this._element('list');
+        const entries = [...data.entries].sort((a, b) =>
+            b.modified - a.modified || a.name.localeCompare(b.name));
         list.replaceChildren();
-        if (data.entries.length === 0) {
+        if (entries.length === 0) {
             const empty = document.createElement('li');
             empty.textContent = _('This folder is empty.');
             list.appendChild(empty);
         }
-        for (const entry of data.entries) {
+        for (const entry of entries) {
             const row = document.createElement('li');
             const name = document.createElement('span');
             name.className = 'noVNC_files_name';

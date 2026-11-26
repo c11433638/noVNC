@@ -114,24 +114,33 @@ describe('Remember browser login', function () {
         expect(fetchStub.firstCall.args[0].pathname).to.match(/\/api\/files\/forget-browser$/);
     });
 
-    it('should respect the remember checkbox when submitting a password', function () {
+    it('should handle credentials form submission and respect the remember checkbox', function () {
+        const form = document.createElement('form');
+        const button = document.createElement('input');
+        button.type = 'submit';
+        form.append(button);
+
         const input = { value: 'filetest' };
         const checkbox = { checked: false };
         const block = { classList: { contains: () => false } };
         const dialog = { classList: { remove() {} } };
-        const elements = { 'noVNC_password_input': input,
+        const elements = { 'noVNC_credentials_button': button,
+                           'noVNC_password_input': input,
                            'noVNC_username_input': { value: '' },
                            'noVNC_remember_browser': checkbox,
                            'noVNC_remember_browser_block': block,
                            'noVNC_credentials_dlg': dialog };
-        const lookup = sinon.stub(document, 'getElementById').callsFake(id => elements[id]);
+        const unused = { addEventListener() {} };
+        const lookup = sinon.stub(document, 'getElementById').callsFake(id => elements[id] ?? unused);
         try {
-            UI.setCredentials({ preventDefault() {} });
+            UI.addConnectionControlHandlers();
+            expect(form.dispatchEvent(new Event('submit', { cancelable: true }))).to.equal(false);
+            expect(UI.rfb.sendCredentials).to.have.been.calledOnceWithExactly({ username: '', password: 'filetest' });
             expect(UI.rememberPendingPassword).to.equal(null);
             expect(input.value).to.equal('');
             input.value = 'filetest';
             checkbox.checked = true;
-            UI.setCredentials({ preventDefault() {} });
+            form.dispatchEvent(new Event('submit', { cancelable: true }));
             expect(UI.rememberPendingPassword).to.equal('filetest');
             expect(input.value).to.equal('');
             expect(fetchStub).to.not.have.been.called;
@@ -141,7 +150,8 @@ describe('Remember browser login', function () {
     });
 
     it('should establish the browser session only after the desktop connection succeeds', async function () {
-        const methods = ['getSetting', 'showStatus', 'updateVisualState', 'updateBeforeUnload', 'updateImeInput'];
+        const methods = ['getSetting', 'showStatus', 'updateVisualState', 'updateImeInput',
+                         'updateLine', 'fitRemoteWindows', 'watchRemoteClipboard'];
         methods.forEach(method => sinon.stub(UI, method));
         try {
             UI.rememberPendingPassword = 'filetest';

@@ -327,10 +327,14 @@ describe('Local input method', function () {
         expect(UI.rfb.pasteText).to.not.have.been.called;
     });
 
-    it('should not replay possibly delivered text after a gateway error', async function () {
+    it('should drop queued text and show a gateway error for three seconds', async function () {
         UI.sameOriginConnection = true;
         fetchStub = sinon.stub(window, 'fetch').rejects(new Error('Connection lost'));
-        const status = sinon.stub(UI, 'showStatus');
+        const status = document.createElement('div');
+        status.id = 'noVNC_status';
+        document.body.append(status);
+        const previousStatusTimeout = UI.statusTimeout;
+        UI.statusTimeout = null;
         try {
             insert('你好');
             UI.keyEvent(KeyTable.XK_Return, 'Enter', true);
@@ -338,9 +342,15 @@ describe('Local input method', function () {
             await Promise.resolve();
             expect(sends).to.be.empty;
             expect(UI.pacedKeys).to.be.empty;
-            expect(status).to.have.been.calledOnce;
+            expect(status.classList.contains('noVNC_status_error')).to.equal(true);
+            clock.tick(2999);
+            expect(status.classList.contains('noVNC_open')).to.equal(true);
+            clock.tick(1);
+            expect(status.classList.contains('noVNC_open')).to.equal(false);
         } finally {
-            status.restore();
+            UI.hideStatus();
+            UI.statusTimeout = previousStatusTimeout;
+            status.remove();
         }
     });
 
